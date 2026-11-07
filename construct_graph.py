@@ -241,7 +241,17 @@ def main():
         "elevation": torch.tensor(st["elevation"].to_numpy(), dtype=torch.float32),
         "land_check": checker.enabled,
         "config": vars(args),
+        # v1-compatible keys (old notebooks / plotting scripts keep working)
+        "node_names": names,
+        "node_coords": torch.tensor(st[["lat", "lon"]].to_numpy(), dtype=torch.float32),
+        "node_elevations": torch.tensor(st["elevation"].to_numpy(), dtype=torch.float32).unsqueeze(-1),
+        "is_virtual": torch.zeros(len(names), dtype=torch.bool),
+        "k_neighbors": args.k_neighbors, "max_distance_km": args.max_dist_km,
+        "sigma_dist": args.sigma_km, "gamma_bath": args.gamma_bath,
     }, out)
+    cochin = names.index("Cochin") if "Cochin" in names else None
+    if cochin is not None:
+        print("Cochin neighbours:", [names[d] for s, d in zip(src, dst) if s == cochin])
     audit = pd.DataFrame({"src": [names[i] for i in src], "dst": [names[j] for j in dst],
                           "distance_km": dist.round(1), "sim_geo": edge_attr[:, 0].round(4),
                           "sim_bath": edge_attr[:, 1].round(4)})

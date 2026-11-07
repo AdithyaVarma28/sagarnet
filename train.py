@@ -35,17 +35,21 @@ from utils import load_graph, mask_history, pick_device, random_node_mask, set_s
 
 def get_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dataset", default=C.DEFAULT_DATASET)
+    # v1 flag names are accepted as aliases: --csv, --station, --lambda_phys, --lambda_grad, --lambda_mass,
+    # --no_gat, --quick
+    ap.add_argument("--dataset", "--csv", dest="dataset", default=C.DEFAULT_DATASET)
     ap.add_argument("--graph", default=C.DEFAULT_GRAPH)
     ap.add_argument("--cache-dir", default=C.DEFAULT_CACHE_DIR)
     ap.add_argument("--rebuild-cache", action="store_true")
-    ap.add_argument("--holdout", nargs="*", default=["Cochin"], help="station(s) treated as ungauged; '' for none")
+    ap.add_argument("--holdout", "--station", dest="holdout", nargs="*", default=["Cochin"],
+                    help="station(s) treated as ungauged; '' for none")
     ap.add_argument("--run-name", default=None)
     ap.add_argument("--out-dir", default="runs")
     # model
     ap.add_argument("--hidden", type=int, default=64)
     ap.add_argument("--heads", type=int, default=4)
-    ap.add_argument("--gnn-layers", type=int, default=2)
+    ap.add_argument("--gnn-layers", type=int, default=2, help="0 = no graph (v1 --no_gat GRU baseline)")
+    ap.add_argument("--no_gat", "--no-gat", action="store_true", help="alias for --gnn-layers 0")
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--history", type=int, default=C.HISTORY_HOURS)
     ap.add_argument("--no-future-forcing", action="store_true",
@@ -65,9 +69,9 @@ def get_args(argv=None):
     ap.add_argument("--mask-prob", type=float, default=0.3)
     ap.add_argument("--masked-weight", type=float, default=1.0, help="loss weight multiplier for masked gauged nodes")
     # physics
-    ap.add_argument("--lam-ib", type=float, default=0.02)
-    ap.add_argument("--lam-grad", type=float, default=0.01)
-    ap.add_argument("--lam-mass", type=float, default=0.002)
+    ap.add_argument("--lam-ib", "--lambda_phys", dest="lam_ib", type=float, default=0.02)
+    ap.add_argument("--lam-grad", "--lambda_grad", dest="lam_grad", type=float, default=0.01)
+    ap.add_argument("--lam-mass", "--lambda_mass", dest="lam_mass", type=float, default=0.002)
     ap.add_argument("--phys-decay-h", type=float, default=18.0)
     ap.add_argument("--phys-warmup", type=int, default=2, help="epochs of pure pinball before physics ramps in")
     # misc
@@ -75,8 +79,13 @@ def get_args(argv=None):
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--skip-eval", action="store_true")
+    ap.add_argument("--quick", action="store_true", help="smoke run: 3 epochs x 100 steps (like v1 --quick)")
     a = ap.parse_args(argv)
     a.holdout = [h for h in a.holdout if h]
+    if a.no_gat:
+        a.gnn_layers = 0
+    if a.quick:
+        a.epochs, a.steps_per_epoch, a.val_stride = 3, 100, 24
     return a
 
 

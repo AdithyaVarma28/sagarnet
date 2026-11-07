@@ -31,16 +31,23 @@ import torch.nn.functional as F
 
 
 class CausalConvBlock(nn.Module):
+    """Same layout as v1 CausalConv1dBlock (dilated conv -> norm -> ReLU -> dropout -> 1x1 conv -> norm -> ReLU,
+    + residual), with GroupNorm instead of BatchNorm and no ReLU on the residual branch output."""
+
     def __init__(self, ch: int, dilation: int, kernel: int = 3, dropout: float = 0.1):
         super().__init__()
         self.pad = (kernel - 1) * dilation
-        self.conv = nn.Conv1d(ch, ch, kernel, dilation=dilation)
-        self.norm = nn.GroupNorm(1, ch)
+        self.conv1 = nn.Conv1d(ch, ch, kernel, dilation=dilation)
+        self.norm1 = nn.GroupNorm(1, ch)
         self.drop = nn.Dropout(dropout)
+        self.conv2 = nn.Conv1d(ch, ch, 1)
+        self.norm2 = nn.GroupNorm(1, ch)
 
     def forward(self, x):                          # [B, C, L]
-        y = self.conv(F.pad(x, (self.pad, 0)))     # left pad only -> causal
-        return x + self.drop(F.relu(self.norm(y)))
+        y = self.conv1(F.pad(x, (self.pad, 0)))    # left pad only -> causal
+        y = self.drop(F.relu(self.norm1(y)))
+        y = self.norm2(self.conv2(y))              # v1 applied ReLU here -> residual could only grow
+        return F.relu(x + y)
 
 
 class EdgeGATv2(nn.Module):

@@ -22,6 +22,9 @@ def pick_device(name: str = "auto") -> torch.device:
 
 def load_graph(path: str, station_names: list[str]) -> dict:
     g = torch.load(path, map_location="cpu", weights_only=False)
+    if "station_names" not in g:          # v1 graph file (node_names / 2 edge features)
+        raise ValueError(f"{path} is a v1 graph (no bearing features / land audit). "
+                         "Rebuild it with the v2 construct_graph.py.")
     gn = list(g["station_names"])
     if gn != list(station_names):
         missing = sorted(set(station_names) - set(gn))

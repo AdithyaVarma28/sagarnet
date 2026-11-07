@@ -18,6 +18,43 @@ v1 reached a test MAE of **2.20 m** at Cochin, while plain persistence scored **
 | 6 | CQR was calibrated on a different score distribution from the ungauged test | 74% instead of 80% coverage | Calibrate on **pseudo-ungauged** validation scores; per-horizon and optional cyclone/calm (Mondrian) q̂ |
 | 7 | Schema mismatch with the 34-station file (`elevation_m`, `storm_*`) | KeyError, or cyclone features silently dropped | Alias-based schema resolution for `gebco_*` and `cyclone_*` columns, with physical defaults |
 
+### 1.1 Review of the actual v1 code (`sagar-main/`)
+
+These findings come from reading the v1 source itself, not only `CLAUDE_PROMPT.md`.
+
+| # | Location (v1) | Finding | Severity | v2 status |
+|---|---|---|---|---|
+| A | `sagar_dataset.py:266` | `__getitem__` returns `y_current`, which is never defined → **NameError**. The repo snapshot cannot run; the reported results came from an earlier version. | Crash | Fixed: `last` / `last_mask` are computed explicitly |
+| B | `train.py:464` | A stray line containing only `x` → **NameError** after evaluation. | Crash | Fixed |
+| C | `sagar_dataset.py:189-191` | Inputs are only `dynamic_cols + 6 harmonics`. **Sea level is never an input.** | Accuracy (major) | Residual history + mask channel |
+| D | `sagar_dataset.py:130` | Target = raw `sea_level` (chart datum). | Accuracy (major, the 2.2 m bias) | Surge residual target |
+| E | `train.py:395-418` | Early stopping, LR scheduler and checkpointing all use **Cochin's** validation MAE. | Leakage | Selection on training stations only |
+| F | `train.py:207-237` | CQR is calibrated on Cochin's validation period. In a true ungauged setting those labels do not exist. | Leakage | Pseudo-ungauged calibration on training stations |
+| G | `construct_graph.py:30-144` | `max_distance_km=1500`, plain k-NN, **no land check** (the corridor whitelist is commented out). Over-land edges are possible. Uses `elevation_m` → KeyError on the 34-station CSV. | Correctness / schema | Great-circle land check, `gebco_*` fallback |
+| H | `loss.py:59` | Wind term divides by `(H_nodes + 10)`. GEBCO depths are negative, so the denominator can be ≈0 or negative → exploding or sign-flipped loss. | Bug | Removed; wind enters as stress features instead |
+| I | `loss.py:103-113` | Gradient loss compares the *change* in level difference with the *absolute* pressure difference at t+h (mismatched quantities). | Bug | Compares residual difference with IB difference, the same quantity |
+| J | `loss.py:161` | Mass loss penalises `delta - net_inflow`, which pulls every predicted change toward 0 (toward persistence) instead of enforcing continuity. | Design | Laplacian smoothness of the rate of change, decayed by horizon |
+| K | `train.py:331` + `model.py:96-97` | Static features `[lat, lon, elev]` are raw, and `LayerNorm(3)` normalises *across* lat/lon/elev of one node (mixed units), which wipes out absolute position. | Accuracy | Standardised per feature across nodes; sin/cos lon; 3 GEBCO depths |
+| L | `sagar_dataset.py:51-56` | Looks for `storm_*` names → all cyclone features silently dropped on the 34-station file. | Schema | `cyclone_*` with `storm_*` aliases |
+| M | `sagar_dataset.py:98` | `ffill()` with no limit → a station gap of months is filled with a stale value. | Data quality | ffill/bfill limited to 6 h, then station climatology |
+| N | `sagar_dataset.py:73` | `df.pivot` raises on duplicate (time, station) rows. | Robustness | Index-based pivot; last value wins |
+| O | `sagar_dataset.py:154-155` | 70/15/15 split by row count, so period boundaries move with the data. | Reproducibility | Fixed calendar dates in `config.py` |
+| P | `sagar_dataset.py:255-257` | Future head gets only scaled `msl` and `wind_speed` at t+h (8-dim). No cyclone, no wind direction, no preceding hours. | Accuracy | All 29 features at t+h−{0,3,6,12} |
+| Q | `model.py:23` | TCN block applies ReLU before the residual add, so the residual branch can only increase activations. | Minor | ReLU moved after the add |
+| R | `model.py:11` | BatchNorm1d statistics are mixed over all nodes in a batch. | Minor | GroupNorm |
+| S | `train.py:236` | `np.quantile` default (linear interpolation) rather than the conservative "higher" conformal quantile. | Minor | `method="higher"` |
+
+### 1.2 What was kept from v1
+- The five-stage TCN → GRU → static → GATv2 → non-crossing quantile pipeline, hidden size 64, 4 heads, dilations 1–16, kernel 3.
+- The TCN block layout: dilated conv → norm → ReLU → dropout → **1×1 conv** → norm, plus residual.
+- The GRU residual fusion `LayerNorm(gru[-1] + tcn[-1])` and the GAT fusion `LN(Linear([h, h_spat]) + h)`.
+- The softplus non-crossing quantile parameterisation.
+- The tidal phase features `τ = t + lon/15` (S1, M2, S2), now with K1 and O1 added.
+- Graph edge weights `sim_geo` (σ = 750 km) and `sim_bath` (γ = 25 m).
+- AdamW (wd 1e-4), grad clip 1.0, ReduceLROnPlateau(×0.5), LOSO by station name.
+- The no-graph GRU baseline (`--no_gat`), the quick mode (`--quick`), and the 7-day prediction plot per horizon.
+- **All v1 command-line flags work as aliases** (see §9).
+
 ---
 
 ## 2. File-by-file changes
@@ -35,7 +72,7 @@ v1 reached a test MAE of **2.20 m** at Cochin, while plain persistence scored **
 | `evaluate.py` | **new** | Fits CQR on the validation period (gauged and pseudo-ungauged), evaluates on the test period, prints per-horizon tables and baselines, and writes `metrics.json` and prediction files. |
 | `loso.py` | **new** | Runs the full Leave-One-Station-Out sweep and writes `runs/loso_summary.csv`. |
 | `utils.py` | **new** | Seeding, device selection, graph/dataset order check, node-masking helpers. |
-| `requirements.txt` | **new** | numpy, pandas, torch, global-land-mask. |
+| `requirements.txt` | **new** | numpy, pandas, torch, global-land-mask, matplotlib. torch-geometric is **no longer needed**. |
 
 ---
 
@@ -99,7 +136,7 @@ Inputs per sample (whole graph at anchor time t):
  ┌──────────────────────────────────────────────────────────────────┐
  │ 1. Multiscale dilated causal TCN encoder                         │
  │    Linear(31→64) → 5 × CausalConv1d(k=3, d=1,2,4,8,16)           │
- │    each: left-pad → conv → GroupNorm(1,64) → ReLU → Dropout → +x │
+ │    each: pad → conv → GN → ReLU → Drop → 1×1 conv → GN → +x → ReLU│
  │    receptive field 63 h, no future leakage                        │
  └───────────────────────────────┬──────────────────────────────────┘
  ┌───────────────────────────────▼──────────────────────────────────┐
@@ -213,6 +250,7 @@ Files written to `runs/<run>/`:
 - `history.json`: loss components and validation MAE per epoch
 - `metrics.json`: all metrics above
 - `pred_test_<Station>.npz`: time, horizons, residual quantiles, observed residual, observed total, tide (for plotting)
+- `prediction_plot_<Station>.png`: v1-style 7-day plot per horizon showing observed vs predicted total level, with raw and CQR bands
 
 `runs/loso_summary.csv` holds the per-station LOSO averages (from `loso.py`).
 
@@ -283,6 +321,21 @@ Folds that already have `metrics.json` are skipped, so the sweep can be resumed.
 | Longer, more patient training | `train.py --holdout Cochin --patience 6 --epochs 100` |
 | All stations gauged (no holdout) | `train.py --holdout "" --run-name all_gauged` |
 | Rebuild cache after editing CSV/splits | add `--rebuild-cache` |
+
+### v1 commands still work
+| v1 command / flag | v2 equivalent |
+|---|---|
+| `train.py --station Cochin` | same (alias of `--holdout`) |
+| `--csv <file>` | same (alias of `--dataset`) |
+| `--lambda_phys / --lambda_grad / --lambda_mass` | same (aliases of `--lam-ib / --lam-grad / --lam-mass`) |
+| `--no_gat` | same (= `--gnn-layers 0`, GRU-only baseline) |
+| `--quick` | same (3 epochs × 100 steps) |
+| `--epochs --patience --lr --graph` | same |
+| output `best_model_Cochin.pt` | `runs/loso_Cochin/best.pt` |
+| output `prediction_plot_Cochin.png` | `runs/loso_Cochin/prediction_plot_Cochin.png` (now total level = tide + surge, with raw and CQR bands) |
+| graph keys `node_names`, `node_coords`, `node_elevations` | still saved in `static_graph.pt`, alongside the v2 keys |
+
+A v1 `static_graph.pt` is rejected with a clear message: rebuild it, because v2 needs the bearing edge features.
 
 ### Main `train.py` arguments
 | Argument | Default | Notes |

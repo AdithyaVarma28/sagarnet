@@ -155,6 +155,45 @@ def print_report(title: str, rep: dict, gauged: bool):
               f"{r.get('cal_width', float('nan')):.3f} | {r.get('q_hat', float('nan')):+.4f}")
 
 
+def save_prediction_plot(e: dict, cal: CQR, horizons, station: str, path: Path, hours: int = 168):
+    """v1-style plot: observed vs predicted TOTAL water level with raw and CQR 80 % bands, one panel per horizon."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[info] matplotlib not installed - skipping prediction plot")
+        return
+    n = len(e["t"])
+    plot_len = min(hours, n)
+    start = 0
+    for i in range(0, max(n - plot_len, 1), 24):       # first fully observed window
+        if np.isfinite(e["y_tot"][i:i + plot_len, 0]).all():
+            start = i
+            break
+    sl = slice(start, start + plot_len)
+    grp = (e["cyc"] > 0.5).astype(int)
+    lo_c, hi_c = cal.apply(e["q"][..., 0], e["q"][..., 2], grp)
+    fig, axes = plt.subplots(len(horizons), 1, figsize=(12, 2.2 * len(horizons)), sharex=True)
+    x = np.arange(plot_len)
+    for h, (ax, hz) in enumerate(zip(np.atleast_1d(axes), horizons)):
+        tide = e["tide"][sl, h]
+        ax.plot(x, e["y_tot"][sl, h], color="black", lw=1.4, label="Observed")
+        ax.plot(x, tide + e["q"][sl, h, 1], color="tab:blue", ls="--", label="Predicted q50 (tide + surge)")
+        ax.fill_between(x, tide + lo_c[sl, h], tide + hi_c[sl, h], color="tab:blue", alpha=0.12, label="CQR 80 %")
+        ax.fill_between(x, tide + e["q"][sl, h, 0], tide + e["q"][sl, h, 2], color="tab:blue", alpha=0.25,
+                        label="Raw q10-q90")
+        ax.set_ylabel("Level (m)")
+        ax.set_title(f"{station}: +{hz} h", fontsize=10)
+        if h == 0:
+            ax.legend(loc="upper right", fontsize=8, ncol=2)
+    np.atleast_1d(axes)[-1].set_xlabel("Hours from window start (test period)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"Saved plot {path}")
+
+
 def run_evaluation(ckpt: str, dataset: str = C.DEFAULT_DATASET, cache_dir: str = C.DEFAULT_CACHE_DIR,
                    out_dir: str | None = None, device: str = "auto", alpha: float = 0.2,
                    cqr_mode: str = "additive", mondrian: bool = True, cal_mask_prob: float = 0.3,
@@ -205,6 +244,7 @@ def run_evaluation(ckpt: str, dataset: str = C.DEFAULT_DATASET, cache_dir: str =
                                 time=data.times[e["t"]].astype("datetime64[s]").astype(str),
                                 horizons=np.array(hz), q_res=e["q"], y_res=e["y_res"],
                                 y_total=e["y_tot"], tide=e["tide"])
+            save_prediction_plot(e, cal_u, hz, data.names[j], out / f"prediction_plot_{data.names[j]}.png")
     else:   # no held-out station: report pseudo-ungauged test skill
         pm = predict(model, data, "test", test_stride, dev, mask_prob=cal_mask_prob, seed=7)
         rep = horizon_report(flatten(pm, gather_targets(data, pm["t"]), gauged_nodes & has_tide, True),
