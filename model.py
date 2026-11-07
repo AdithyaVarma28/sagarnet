@@ -148,6 +148,7 @@ class SagarNet(nn.Module):
         for blk in self.tcn:
             h = blk(h)
         h_tcn = h.transpose(1, 2)
+        self.gru.flatten_parameters()          # silences the cuDNN warning after EMA deepcopy
         g, _ = self.gru(h_tcn)
         h = self.temp_norm(g[:, -1] + h_tcn[:, -1]).view(B, N, -1)
         h = h + self.static_mlp(static).unsqueeze(0)

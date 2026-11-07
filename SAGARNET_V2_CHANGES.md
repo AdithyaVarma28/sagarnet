@@ -44,6 +44,17 @@ These findings come from reading the v1 source itself, not only `CLAUDE_PROMPT.m
 | R | `model.py:11` | BatchNorm1d statistics are mixed over all nodes in a batch. | Minor | GroupNorm |
 | S | `train.py:236` | `np.quantile` default (linear interpolation) rather than the conservative "higher" conformal quantile. | Minor | `method="higher"` |
 
+### 1.1b First real run of v2 (Cochin holdout) and what it changed
+
+| Group | v2 MAE | Best baseline | Result |
+|---|---|---|---|
+| Gauged stations, test 2022 | **0.057 m** | tide + persistence 0.100 m, tide-only 0.159 m | Clear improvement (v1 had no gauged result) |
+| Cochin, ungauged | 0.227 m | tide-only 0.223 m, persistence 0.212 m | Datum bias removed (v1: 2.20 m), but no skill over tide-only |
+
+Two causes were found and handled:
+1. **The graph left Cochin isolated.** The straight-line land check rejected 425 edges, producing 7 components, and Cochin had 0 neighbours. It was replaced by sea-route distances. With approximate station coordinates the graph is 1 component, min degree 2, and Cochin connects to Vishakhapatnam (1650 km by sea) and Sabang.
+2. **Cochin's harmonic tide does not match the 2022 data.** Tide-only MAE is 0.22 m, while persistence at +24 h is only 0.08 m, so the level is predictable but the train-period tide fit is off (bias +0.12 m). `diagnose_stations.py` detects whether this is a datum shift, a timestamp shift or a noisy record. This error sets a floor that no model can beat, so it must be fixed in the data.
+
 ### 1.2 What was kept from v1
 - The five-stage TCN → GRU → static → GATv2 → non-crossing quantile pipeline, hidden size 64, 4 heads, dilations 1–16, kernel 3.
 - The TCN block layout: dilated conv → norm → ReLU → dropout → **1×1 conv** → norm, plus residual.
@@ -63,7 +74,8 @@ These findings come from reading the v1 source itself, not only `CLAUDE_PROMPT.m
 |---|---|---|
 | `config.py` | **new** | One place for constants: paths, SI physics constants (ρw = 1025, g = 9.80665, ρw·g ≈ 10051.8 Pa/m), horizons, quantiles, temporal splits, tide constituents, column aliases, cyclone defaults. |
 | `tides.py` | **new** | (a) Cyclical tidal phase features from spec 3.1 with τ = t + lon/15 (S1, M2, S2, plus K1 and O1). (b) Robust least-squares **harmonic analysis** with 17 constituents (M2, S2, N2, K2, K1, O1, P1, Q1, S1, M4, MS4, MN4, M6, Mf, Mm, Ssa, Sa) plus mean and linear trend. |
-| `construct_graph.py` | **rewritten** | Elevation column fallback chain `gebco_mean_5km_m → gebco_nearest_m → gebco_min_5km_m → elevation_m`. Reads the 3M-row CSV in chunks. Samples each candidate edge along its great circle and rejects it if it crosses more than 40 km of continuous land (small islands are allowed, peninsulas are not). Edges are reciprocal. Isolated nodes get one longer marine link. Edge attributes are now `[sim_geo, sim_bath, sin(bearing), cos(bearing)]`. Writes `static_graph_edges.csv` for auditing. |
+| `construct_graph.py` | **rewritten** | Elevation column fallback chain `gebco_mean_5km_m → gebco_nearest_m → gebco_min_5km_m → elevation_m`. Reads the CSV in chunks. **Sea-route connectivity:** builds a 0.1° ocean grid, snaps each station to open sea, and uses Dijkstra to get water-only path lengths. An edge is allowed if the sea route is ≤ 2200 km and ≤ 2.5× the straight-line distance. Every node gets at least 2 marine neighbours, and disconnected parts are bridged. `sim_geo` uses the sea-route distance. Edge attributes are `[sim_geo, sim_bath, sin(bearing), cos(bearing)]`. Prints every node's neighbours and writes `static_graph_edges.csv`. |
+| `diagnose_stations.py` | **new** | Per-station data-quality check: residual mean/std per split, tide-only MAE, best timestamp lag per split. Flags `DATUM_SHIFT`, `TIME_SHIFT`, `NOISY`, `SPARSE_TRAIN`. `--station X` also saves a plot. |
 | `sagar_dataset.py` | **rewritten** | `cyclone_*` schema with legacy `storm_*` aliases. Cleans the GESLA missing-value sentinel (−99.9999). Gap-fills forcing. Computes physics-derived features. Runs a train-period tide fit per station and builds the surge residual target. Despikes labels. Caches everything to `cache/*.npz`. Window dataset with history and mask channels. |
 | `model.py` | **rewritten** | Same five stages. GroupNorm replaces BatchNorm. Graph attention is now two stacked GATv2 blocks in pure PyTorch (no torch-geometric). One shared horizon head with a horizon embedding. Learned persistence skip. |
 | `loss.py` | **rewritten** | Pinball loss, plus horizon-decayed Huber IB, spatial-gradient and mass-continuity terms, with a warm-up ramp. |
@@ -288,6 +300,12 @@ Check the console output:
 - `Rejected over-land candidates` lists the land-crossing edges that were dropped.
 - `sim_bath range`: if it is about 0 for most edges, rebuild with `--gamma-bath 200`.
 - Open `static_graph_edges.csv` and confirm there are no links across India or the Malay Peninsula.
+
+### Step 1b: Check station data quality
+```powershell
+.\.venv\Scripts\python.exe diagnose_stations.py --station Cochin
+```
+Look at the `flags` column and `diag_Cochin.png`. Any station flagged `TIME_SHIFT` or `DATUM_SHIFT` in the test split will have a poor score whatever the model does.
 
 ### Step 2: Train one LOSO fold (Cochin)
 ```powershell
