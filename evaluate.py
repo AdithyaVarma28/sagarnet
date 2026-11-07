@@ -65,15 +65,19 @@ def predict(model, data: SagarData, split: str, stride: int, device, batch_size=
 
 
 def gather_targets(data: SagarData, t: np.ndarray) -> dict:
+    """All in metres. y_res = what the model predicts (surge); base = known part of total level:
+    harmonic tide + slow 30-day level from the gauge's own past (0 at ungauged stations)."""
     tgt = t[:, None] + data.horizons[None, :]                          # [S,H]
     nan_if = lambda a, m: np.where(m, a, np.nan)
-    sea = nan_if(data.sea_level, data.valid)
-    res = nan_if(data.resid, data.valid)
+    sea = nan_if(data.sea_level, data.valid_obs)
+    y = nan_if(data.target, data.valid)
     sw = lambda a: a[tgt].transpose(0, 2, 1)                            # [S,H,N] -> [S,N,H]
+    base = sw(data.tide) + data.lf_known[t][:, :, None]
+    obs_now = nan_if(data.resid_full - data.off, data.valid_obs & data.off_ok)
     return {
-        "y_res": sw(res), "y_tot": sw(sea), "tide": sw(data.tide),
-        "ib": sw(data.ib_n * data.scale), "cyc": sw(data.cyc_active),
-        "sea_now": sea[t], "res_now": res[t],                          # [S,N]
+        "y_res": sw(y), "y_tot": sw(sea), "base": base, "tide": sw(data.tide),
+        "ib": sw(data.ib_t), "cyc": sw(data.cyc_active),
+        "sea_now": sea[t], "res_now": obs_now[t],                      # [S,N]
     }
 
 
@@ -98,8 +102,11 @@ def horizon_report(e: dict, cal: CQR | None, horizons, gauged: bool) -> dict:
         ok = np.isfinite(e["y_res"][:, h]) & np.isfinite(e["sea_now"])
         if ok.sum() == 0:
             continue
+        ok &= np.isfinite(e["y_tot"][:, h])
+        if ok.sum() == 0:
+            continue
         y_r, y_t = e["y_res"][ok, h], e["y_tot"][ok, h]
-        tide = e["tide"][ok, h]
+        tide = e["base"][ok, h]          # tide + known slow level
         pred_t = tide + q50[ok, h]
         mae = lambda p, y: float(np.mean(np.abs(p - y)))
         rmse = lambda p, y: float(np.sqrt(np.mean((p - y) ** 2)))
@@ -111,6 +118,8 @@ def horizon_report(e: dict, cal: CQR | None, horizons, gauged: bool) -> dict:
             "mae_persistence": mae(e["sea_now"][ok], y_t), "rmse_persistence": rmse(e["sea_now"][ok], y_t),
             "mae_tide_only": mae(tide, y_t),
             "mae_tide_ib": mae(tide + e["ib"][ok, h], y_t),
+            "mae_surge_zero": float(np.mean(np.abs(y_r))),
+            "mae_surge_ib": mae(e["ib"][ok, h], y_r),
             "raw_cov": float(np.mean((y_r >= q10[ok, h]) & (y_r <= q90[ok, h]))),
             "raw_width": float(np.mean(q90[ok, h] - q10[ok, h])),
         }
@@ -139,11 +148,14 @@ def print_report(title: str, rep: dict, gauged: bool):
         return
     a = rep["average"]
     print(f"\n=== {title} ===")
+    base_lbl = "tide+30d-level" if gauged else "tide-only"
     print(f"Average MAE total {a['mae_total']:.4f} m (persistence {a['mae_persistence']:.4f}, "
-          f"tide-only {a['mae_tide_only']:.4f}, tide+IB {a['mae_tide_ib']:.4f}"
+          f"{base_lbl} {a['mae_tide_only']:.4f}, +IB {a['mae_tide_ib']:.4f}"
           + (f", tide+persist {a['mae_tide_persist']:.4f}" if gauged else "") + ")")
     print(f"Average RMSE total {a['rmse_total']:.4f} m (persistence {a['rmse_persistence']:.4f}) | "
-          f"surge MAE {a['mae_res']:.4f} m | bias {a['bias_total']:+.4f} m")
+          f"bias {a['bias_total']:+.4f} m")
+    print(f"Surge MAE {a['mae_res']:.4f} m (zero-surge {a['mae_surge_zero']:.4f}, IB-only {a['mae_surge_ib']:.4f}) "
+          f"| surge skill vs zero {1 - a['mae_res'] / max(a['mae_surge_zero'], 1e-9):+.1%}")
     if "cal_cov" in a:
         print(f"Raw cov {a['raw_cov']:.1%} (width {a['raw_width']:.3f} m) | "
               f"CQR cov {a['cal_cov']:.1%} (width {a['cal_width']:.3f} m) nominal 80%")
@@ -177,7 +189,7 @@ def save_prediction_plot(e: dict, cal: CQR, horizons, station: str, path: Path, 
     fig, axes = plt.subplots(len(horizons), 1, figsize=(12, 2.2 * len(horizons)), sharex=True)
     x = np.arange(plot_len)
     for h, (ax, hz) in enumerate(zip(np.atleast_1d(axes), horizons)):
-        tide = e["tide"][sl, h]
+        tide = e["base"][sl, h]
         ax.plot(x, e["y_tot"][sl, h], color="black", lw=1.4, label="Observed")
         ax.plot(x, tide + e["q"][sl, h, 1], color="tab:blue", ls="--", label="Predicted q50 (tide + surge)")
         ax.fill_between(x, tide + lo_c[sl, h], tide + hi_c[sl, h], color="tab:blue", alpha=0.12, label="CQR 80 %")
@@ -203,7 +215,7 @@ def run_evaluation(ckpt: str, dataset: str = C.DEFAULT_DATASET, cache_dir: str =
     a = ck["args"]
     cache = build_cache(dataset, cache_dir)
     data = SagarData(cache, ck["holdout"], history=a["history"], stats=ck["stats"],
-                     use_future_forcing=not a["no_future_forcing"])
+                     use_future_forcing=not a["no_future_forcing"], target=a.get("target", "full"))
     out = Path(out_dir or Path(ckpt).parent)
     hz = list(C.HORIZONS)
     gauged_nodes = ~data.holdout
@@ -243,7 +255,7 @@ def run_evaluation(ckpt: str, dataset: str = C.DEFAULT_DATASET, cache_dir: str =
             np.savez_compressed(out / f"pred_test_{data.names[j]}.npz",
                                 time=data.times[e["t"]].astype("datetime64[s]").astype(str),
                                 horizons=np.array(hz), q_res=e["q"], y_res=e["y_res"],
-                                y_total=e["y_tot"], tide=e["tide"])
+                                y_total=e["y_tot"], tide=e["tide"], base=e["base"])
             save_prediction_plot(e, cal_u, hz, data.names[j], out / f"prediction_plot_{data.names[j]}.png")
     else:   # no held-out station: report pseudo-ungauged test skill
         pm = predict(model, data, "test", test_stride, dev, mask_prob=cal_mask_prob, seed=7)

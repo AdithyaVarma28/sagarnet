@@ -52,6 +52,8 @@ def get_args(argv=None):
     ap.add_argument("--no_gat", "--no-gat", action="store_true", help="alias for --gnn-layers 0")
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--history", type=int, default=C.HISTORY_HOURS)
+    ap.add_argument("--target", choices=["surge", "full"], default="surge",
+                    help="surge: forecast residual minus 30-day mean (default); full: whole residual")
     ap.add_argument("--no-future-forcing", action="store_true",
                     help="do not feed ERA5/IBTrACS at future times (only tide/calendar); realistic operational mode")
     # optimisation
@@ -128,7 +130,8 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
 
     cache = build_cache(args.dataset, args.cache_dir, force=args.rebuild_cache)
-    data = SagarData(cache, args.holdout, history=args.history, use_future_forcing=not args.no_future_forcing)
+    data = SagarData(cache, args.holdout, history=args.history, use_future_forcing=not args.no_future_forcing,
+                     target=args.target)
     graph = load_graph(args.graph, data.names)
     print(f"Device {device} | stations {data.N} | holdout {args.holdout} | residual scale {data.scale:.4f} m")
     print(f"Input dim {data.in_dim} | future dim {data.fut_dim} | static dim {data.static_dim}")

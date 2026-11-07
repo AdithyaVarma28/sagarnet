@@ -55,6 +55,28 @@ Two causes were found and handled:
 1. **The graph left Cochin isolated.** The straight-line land check rejected 425 edges, producing 7 components, and Cochin had 0 neighbours. It was replaced by sea-route distances. With approximate station coordinates the graph is 1 component, min degree 2, and Cochin connects to Vishakhapatnam (1650 km by sea) and Sabang.
 2. **Cochin's harmonic tide does not match the 2022 data.** Tide-only MAE is 0.22 m, while persistence at +24 h is only 0.08 m, so the level is predictable but the train-period tide fit is off (bias +0.12 m). `diagnose_stations.py` detects whether this is a datum shift, a timestamp shift or a noisy record. This error sets a floor that no model can beat, so it must be fixed in the data.
 
+### 1.1c Second real run and station diagnostics: the surge target
+
+With the sea-route graph, the ungauged validation MAE improved (0.087 → 0.077 m) and gauged stations reached 0.056 m. Cochin did not change (0.232 m against 0.223 m for tide-only). `diagnose_stations.py` showed why:
+
+- **30 of 34 stations** have a positive mean residual in 2022 (median about +0.1 m). This is a **regional sea-level anomaly** (the 2020–22 La Niña high), not a gauge fault. A tide fitted on 2011–19 cannot contain it.
+- Gauged stations handle it because they see their own history. An **ungauged station cannot know its slow level**, and Cochin's goes the opposite way (−0.12 m) from its neighbours (Vishakhapatnam +0.43 m, Sabang +0.09 m).
+- Station faults: Vishakhapatnam has a datum jump, Langkawi and Cochin have doubled variance in 2022, Moulmein and Sibolga have no 2022 data, and Prigi has 31 test points.
+
+**Fix (standard in storm-surge studies):** split the residual into a slow 30-day mean-sea-level anomaly and the fast surge.
+
+```
+sea_level = harmonic tide + slow level (30-day mean) + surge
+label     = residual(t+h) − centred 30-day mean            (surge; datum jumps cancel out)
+inputs    = residual history − trailing 30-day mean at t   (causal)
+total     = tide + trailing 30-day level (gauged, from its own past) + predicted surge
+            tide + predicted surge  (ungauged; slow level would come from satellite altimetry)
+```
+
+On synthetic data built to reproduce this pattern, the ungauged surge skill went from −6% to +40% vs zero-surge, with calibrated coverage of 78%. `--target full` reproduces the old behaviour for comparison. For ungauged stations, **surge MAE is the main metric**. Total-level MAE there also includes the unknown slow level, which is reported but is not a model error.
+
+`diagnose_stations.py` now flags offsets **relative to the regional median**, plus `NO_DATA`, `TIME_SHIFT` and `NOISY` (using surge variance).
+
 ### 1.2 What was kept from v1
 - The five-stage TCN → GRU → static → GATv2 → non-crossing quantile pipeline, hidden size 64, 4 heads, dilations 1–16, kernel 3.
 - The TCN block layout: dilated conv → norm → ReLU → dropout → **1×1 conv** → norm, plus residual.

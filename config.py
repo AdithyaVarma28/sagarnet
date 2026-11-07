@@ -31,6 +31,9 @@ QUANTILES = (0.1, 0.5, 0.9)
 # stacked for the horizon head (0 = forcing at the target hour itself).
 FUTURE_LAGS = (0, 3, 6, 12)
 
+# Window for the slow mean-sea-level anomaly removed from the surge target (30 days).
+LF_WINDOW_HOURS = 720
+
 # Temporal split (inclusive end timestamps). Data ends 2022-12-31 23:00.
 TRAIN_END = "2019-12-31 23:00:00"
 VAL_END = "2021-12-31 23:00:00"

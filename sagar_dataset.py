@@ -252,7 +252,14 @@ def build_cache(csv_path: str, cache_dir: str = C.DEFAULT_CACHE_DIR, force: bool
 class SagarData:
     def __init__(self, cache: dict, holdout: list[str] | None = None, history: int = C.HISTORY_HOURS,
                  horizons=C.HORIZONS, future_lags=C.FUTURE_LAGS, use_future_forcing: bool = True,
-                 stats: dict | None = None):
+                 stats: dict | None = None, target: str = "surge", lf_window: int = C.LF_WINDOW_HOURS):
+        """
+        target="surge" (default): residual = slow mean-sea-level anomaly + fast surge.
+            label  = residual(t+h) - centred 30-day mean     (fast surge; robust to datum jumps)
+            inputs = residual history - trailing 30-day mean at the anchor (causal)
+            total  = tide + trailing 30-day mean (gauged) + predicted surge
+        target="full": label = full residual (first v2 run).
+        """
         self.names = [str(s) for s in cache["station_names"]]
         self.N = len(self.names)
         holdout = holdout or []
@@ -267,8 +274,35 @@ class SagarData:
         self.T = len(self.times)
 
         self.sea_level, self.tide = cache["sea_level"], cache["tide"]
-        self.valid = cache["valid"].astype(bool)
-        self.resid = np.where(self.valid, self.sea_level - self.tide, 0.0).astype(np.float32)
+        self.target_mode = target
+        valid_raw = cache["valid"].astype(bool) & np.isfinite(self.tide)
+        resid = np.where(valid_raw, self.sea_level - self.tide, np.nan).astype(np.float32)
+        ib = cache["ib"]
+        if target == "surge":
+            mp = lf_window // 3
+            rdf = pd.DataFrame(resid)
+            lf_c = rdf.rolling(lf_window, center=True, min_periods=mp).mean().to_numpy(np.float32)
+            lf_t = rdf.rolling(lf_window, min_periods=mp).mean().to_numpy(np.float32)
+            ib_lf = pd.DataFrame(ib).rolling(lf_window, center=True, min_periods=1).mean().to_numpy(np.float32)
+            self.valid = valid_raw & np.isfinite(lf_c)
+            tgt = resid - lf_c
+            self.off = np.nan_to_num(lf_t)                 # causal slow level known at gauged anchors
+            self.off_ok = np.isfinite(lf_t)
+            ib_t = ib - ib_lf
+        elif target == "full":
+            self.valid = valid_raw
+            tgt = resid
+            self.off = np.zeros_like(resid)
+            self.off_ok = np.ones(resid.shape, dtype=bool)
+            ib_t = ib
+        else:
+            raise ValueError(target)
+        self.valid_obs = valid_raw
+        self.resid_full = np.nan_to_num(resid)              # metres, 0 where invalid
+        self.target = np.where(self.valid, tgt, 0.0).astype(np.float32)
+        self.ib_t = ib_t.astype(np.float32)
+        # slow level usable for total-water-level reconstruction: unknown (0) at ungauged stations
+        self.lf_known = np.where(self.holdout[None, :], 0.0, self.off).astype(np.float32)
         self.cyc_active = cache["cyc_active"]
         self.dyn_names = [str(s) for s in cache["dyn_names"]]
 
@@ -280,7 +314,7 @@ class SagarData:
                 if n.startswith(_NO_NORM_PREFIX) or n in _NO_NORM:
                     mean[k], std[k] = 0.0, 1.0
             lab = self.valid[: self.train_end] & ~self.holdout[None, :]
-            sigma = float(self.resid[: self.train_end][lab].std())
+            sigma = float(self.target[: self.train_end][lab].std())
             s = cache["static"]
             stats = dict(dyn_mean=mean, dyn_std=std, resid_scale=sigma,
                          static_mean=s.mean(0), static_std=s.std(0) + 1e-6)
@@ -293,8 +327,10 @@ class SagarData:
             self.fut_dyn = self.dyn * keep[None, None, :]
         else:
             self.fut_dyn = self.dyn
-        self.resid_n = (self.resid / self.scale).astype(np.float32)
-        self.ib_n = (cache["ib"] / self.scale).astype(np.float32)
+        self.target_n = (self.target / self.scale).astype(np.float32)
+        self.resid_full_n = (self.resid_full / self.scale).astype(np.float32)
+        self.off_n = (self.off / self.scale).astype(np.float32)
+        self.ib_n = (self.ib_t / self.scale).astype(np.float32)
         self.static = ((cache["static"] - stats["static_mean"]) / stats["static_std"]).astype(np.float32)
 
         self.F = self.dyn.shape[-1]
@@ -336,14 +372,15 @@ class SagarWindows(Dataset):
         L = d.history
         sl = slice(t - L + 1, t + 1)
         x = d.dyn[sl].transpose(1, 0, 2)                                       # [N,L,F]
-        om = (d.valid[sl] & self._obs_ok[None, :]).T.astype(np.float32)        # [N,L]
-        obs = d.resid_n[sl].T * om
+        ok = self._obs_ok & d.off_ok[t]                                        # [N]
+        om = (d.valid_obs[sl] & ok[None, :]).T.astype(np.float32)              # [N,L]
+        obs = (d.resid_full_n[sl] - d.off_n[t][None, :]).T * om
         x = np.concatenate([x, obs[..., None], om[..., None]], -1)
 
         tgt = t + d.horizons
         fut = d.fut_dyn[t + self._fut_off]                                     # [Hn,nl,N,F]
         fut = fut.transpose(2, 0, 1, 3).reshape(d.N, len(d.horizons), -1)
-        y = d.resid_n[tgt].T                                                   # [N,Hn]
+        y = d.target_n[tgt].T                                                  # [N,Hn]
         ym = d.valid[tgt].T
         return {
             "x": torch.from_numpy(np.ascontiguousarray(x)),

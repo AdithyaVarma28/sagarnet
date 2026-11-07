@@ -81,26 +81,44 @@ def main():
                 r[f"lag_{k}"] = L
             else:
                 r[f"lag_{k}"] = np.nan
+        # fast surge = residual minus centred 30-day mean (what the model now forecasts)
+        rs = pd.Series(res)
+        surge = (rs - rs.rolling(C.LF_WINDOW_HOURS, center=True, min_periods=C.LF_WINDOW_HOURS // 3).mean()).to_numpy()
+        for k, s in splits.items():
+            v = np.isfinite(surge[s])
+            r[f"surge_std_{k}"] = float(np.std(surge[s][v])) if v.sum() > 100 else np.nan
+        rows.append(r)
+
+    df = pd.DataFrame(rows)
+    # A shift shared by the whole region (e.g. the 2020-22 La Nina sea-level high) is real ocean
+    # signal, not a gauge fault. Flag only offsets relative to the regional median.
+    for k in ("val", "test"):
+        df[f"rel_mean_{k}"] = df[f"mean_{k}"] - df[f"mean_{k}"].median()
+    print(f"Regional median slow-level offset: val {df['mean_val'].median():+.3f} m, "
+          f"test {df['mean_test'].median():+.3f} m (real sea-level anomaly, handled by the surge target)")
+    flags_col = []
+    for _, r in df.iterrows():
         flags = []
         if r["tide_fit"] == "none":
             flags.append("NO_FIT")
         if r["n_train"] < 24 * 365:
             flags.append("SPARSE_TRAIN")
         for k in ("val", "test"):
-            if np.isfinite(r[f"mean_{k}"]) and abs(r[f"mean_{k}"]) > 0.05:
-                flags.append(f"DATUM_SHIFT_{k}")
-            if np.isfinite(r[f"lag_{k}"]) and r[f"lag_{k}"] != r.get("lag_train", 0):
+            if r[f"n_{k}"] < 24 * 30:
+                flags.append(f"NO_DATA_{k}")
+                continue
+            if abs(r[f"rel_mean_{k}"]) > 0.08:
+                flags.append(f"DATUM_SHIFT_{k}({r[f'rel_mean_{k}']:+.2f}m)")
+            if np.isfinite(r[f"lag_{k}"]) and r[f"lag_{k}"] != r["lag_train"]:
                 flags.append(f"TIME_SHIFT_{k}({int(r[f'lag_{k}']):+d}h)")
-            if np.isfinite(r[f"std_{k}"]) and r[f"std_{k}"] > 1.5 * max(r["std_train"], 1e-3):
+            if r[f"surge_std_{k}"] > 1.5 * max(r["surge_std_train"], 1e-3):
                 flags.append(f"NOISY_{k}")
-        r["flags"] = " ".join(flags)
-        rows.append(r)
-
-    df = pd.DataFrame(rows)
+        flags_col.append(" ".join(flags))
+    df["flags"] = flags_col
     df.to_csv(a.out, index=False)
-    cols = ["station", "tide_fit", "n_train", "n_test", "mean_test", "std_train", "std_test",
-            "tide_mae_test", "lag_train", "lag_test", "flags"]
-    with pd.option_context("display.width", 200, "display.max_rows", 100):
+    cols = ["station", "n_train", "n_test", "mean_test", "rel_mean_test", "surge_std_train",
+            "surge_std_test", "lag_test", "flags"]
+    with pd.option_context("display.width", 250, "display.max_rows", 100, "display.max_colwidth", 80):
         print(df[cols].round(3).to_string(index=False))
     bad = df[df["flags"] != ""]
     print(f"\n{len(bad)} station(s) flagged. Saved {a.out}")
