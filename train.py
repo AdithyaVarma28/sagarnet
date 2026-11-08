@@ -50,6 +50,8 @@ def get_args(argv=None):
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--gnn-layers", type=int, default=2, help="0 = no graph (v1 --no_gat GRU baseline)")
     ap.add_argument("--no_gat", "--no-gat", action="store_true", help="alias for --gnn-layers 0")
+    ap.add_argument("--no-transfer", action="store_true",
+                    help="disable the v2.3 horizon-wise neighbour transfer (ablation / v2.2 model)")
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--history", type=int, default=C.HISTORY_HOURS)
     ap.add_argument("--target", choices=["surge", "full"], default="surge",
@@ -148,7 +150,8 @@ def main(argv=None):
 
     model_kwargs = dict(in_dim=data.in_dim, fut_dim=data.fut_dim, static_dim=data.static_dim,
                         horizons=list(C.HORIZONS), hidden=args.hidden, heads=args.heads,
-                        gnn_layers=args.gnn_layers, dropout=args.dropout)
+                        gnn_layers=args.gnn_layers, dropout=args.dropout,
+                        transfer=not args.no_transfer and args.gnn_layers > 0)
     model = SagarNet(edge_index=graph["edge_index"], edge_attr=graph["edge_attr"], **model_kwargs).to(device)
     ema = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(args.ema), use_buffers=False)
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")

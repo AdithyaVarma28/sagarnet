@@ -37,7 +37,11 @@ from utils import load_graph, mask_history, pick_device, random_node_mask, to_de
 def load_model(ckpt_path: str, device):
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     m = SagarNet(edge_index=ck["graph"]["edge_index"], edge_attr=ck["graph"]["edge_attr"], **ck["model_kwargs"])
-    m.load_state_dict(ck["model_state"])
+    state = ck["model_state"]
+    if any(k.startswith("head.") for k in state):     # pre-v2.3 checkpoint: head.{0,3,5} -> trunk.{0,3}, out_q
+        ren = {"head.0.": "trunk.0.", "head.3.": "trunk.3.", "head.5.": "out_q."}
+        state = {next((k.replace(a, b) for a, b in ren.items() if k.startswith(a)), k): v for k, v in state.items()}
+    m.load_state_dict(state)
     return m.to(device).eval(), ck
 
 

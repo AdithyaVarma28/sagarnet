@@ -122,6 +122,27 @@ Kelang's total error is now mostly **bias (−0.129 m)**: the 2022 slow sea-leve
 
 `TIDE_LEAK` (> 0.03 m) now flags most stations at the 0.03–0.04 m level. That is normal for a tidal fit. Only stations above ~0.06 m (Kelang, Tawau, Moulmein, Ambon, Cochin, Cendering, Kukup, Vung_Tau) carry meaningful leakage.
 
+### 1.1f Fifth round: graph ablation and the NeighbourTransfer module
+
+Penang held out, 15 epochs, v2.2 (neighbour slow level, 39-constituent tide):
+
+| Penang (ungauged) | Full model | `--no_gat` (no graph) |
+|---|---|---|
+| Total MAE | **0.063 m** (was 0.106 m before the neighbour slow level) | 0.075 m |
+| Surge skill vs zero | **+17.7%** | +2.4% |
+| Gauged total MAE | 0.049 m | 0.051 m |
+
+**Removing the graph removes almost all ungauged skill**, so spatial transfer is where the accuracy comes from. The seasonal tide terms barely changed the leakage (Kelang 0.124 → 0.123 m). Its leftover tide changes over the years and is not seasonal, so tide-fit work stops here.
+
+Architecture change, v2.3 **NeighbourTransfer** (`model.py`): in v2.2 an ungauged node only saw its neighbours through two GATv2 hops of *anchor-time* embeddings. The neighbours' *horizon-specific* forecast states, which include the future weather forcing at each target time, never reached it. The new module sits after the horizon trunk:
+
+- For each horizon, each node attends over its graph neighbours (real edges, no self-loops) that **have live observations** (`last_mask`). Keys and values carry the edge features: distance similarity, bathymetry similarity and bearing.
+- A gate, conditioned on the node's own observation flag, learns how much to borrow. Gauged nodes mostly trust themselves; masked and ungauged nodes borrow from observed neighbours.
+- The output projection is **zero-initialised**, so training starts from exactly the v2.2 model and adds neighbour information only where it lowers the loss.
+- Masked-node training already teaches the module: the 30% hidden gauged nodes have observed neighbours and labels.
+- Cost: +25k parameters (224k → 250k) and about 5% more time per step. On synthetic data, where surge is local, it ties the v2.2 model (+21.3% against +21.2% ungauged skill). Real gains have to be measured on Penang and Kelang.
+- Old checkpoints still load (`head.*` keys are remapped). Train with `--no-transfer` for the v2.2 ablation.
+
 ### 1.2 What was kept from v1
 - The five-stage TCN → GRU → static → GATv2 → non-crossing quantile pipeline, hidden size 64, 4 heads, dilations 1–16, kernel 3.
 - The TCN block layout: dilated conv → norm → ReLU → dropout → **1×1 conv** → norm, plus residual.
@@ -234,8 +255,18 @@ Inputs per sample (whole graph at anchor time t):
  │    edges: k=4 marine neighbours ≤ 2200 km, reciprocal, + self     │
  └───────────────────────────────┬──────────────────────────────────┘
  ┌───────────────────────────────▼──────────────────────────────────┐
- │ 5. Shared multi-horizon non-crossing quantile head               │
- │    z_h = [h, MLP(fut_h), horizon_embedding_h] → MLP → raw(3)      │
+ │ 5. Shared multi-horizon trunk                                    │
+ │    u_h = MLP([h, MLP(fut_h), horizon_embedding_h])   [B,N,5,64]   │
+ └───────────────────────────────┬──────────────────────────────────┘
+ ┌───────────────────────────────▼──────────────────────────────────┐
+ │ 6. NeighbourTransfer (v2.3, --no-transfer to disable)            │
+ │    per horizon: attention from graph neighbours that have live    │
+ │    observations (last_mask) → message m_h                          │
+ │    u_h = u_h + gate([u_h, m_h, own_obs]) · Linear(m_h)  (zero-init)│
+ └───────────────────────────────┬──────────────────────────────────┘
+ ┌───────────────────────────────▼──────────────────────────────────┐
+ │ 7. Non-crossing quantile output                                  │
+ │    raw(3) = Linear(u_h)                                           │
  │    q50 = raw0 + sigmoid(α_h)·last·mask      (persistence skip)    │
  │    q10 = q50 − softplus(raw1);  q90 = q50 + softplus(raw2)        │
  │    ⇒ q10 ≤ q50 ≤ q90 guaranteed                                   │

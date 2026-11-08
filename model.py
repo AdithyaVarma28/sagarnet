@@ -20,6 +20,13 @@ What changed and why
 * One shared horizon head with a learned horizon embedding (more data per
   parameter than five separate heads), fed with stacked future forcing at
   lags FUTURE_LAGS before each target time.
+* v2.3 NeighbourTransfer (``transfer=True``): after the horizon trunk, every
+  node attends - separately for each horizon - to the horizon states of its
+  graph neighbours that have live observations (last_mask). Masked/ungauged
+  nodes thus read their neighbours' horizon-specific forecasts directly
+  ("learned kriging of forecasts") instead of only via the 2 GNN hops of
+  anchor-time embeddings. The ablation without the graph cut Penang LOSO surge
+  skill from +17.7% to +2.4%, so spatial transfer is where accuracy comes from.
 """
 from __future__ import annotations
 
@@ -101,10 +108,65 @@ class GraphBlock(nn.Module):
         return self.norm2(h + self.drop(self.ffn(h)))
 
 
+class NeighbourTransfer(nn.Module):
+    """Horizon-wise attention from observed neighbours to every node.
+
+    u [B,N,Hn,C] horizon states, src_ok [B,N] = node has live observations.
+    Messages flow only along graph edges (no self loops) and only from observed
+    sources; a node with no observed neighbour receives zero. A learned gate,
+    conditioned on the node's own observation flag, decides how much to use.
+    """
+
+    def __init__(self, ch: int, heads: int, edge_dim: int, dropout: float = 0.1):
+        super().__init__()
+        assert ch % heads == 0
+        self.h, self.c = heads, ch // heads
+        self.q = nn.Linear(ch, ch)
+        self.k = nn.Linear(ch, ch)
+        self.v = nn.Linear(ch, ch)
+        self.e = nn.Linear(edge_dim, ch)
+        self.out = nn.Linear(ch, ch)
+        self.gate = nn.Sequential(nn.Linear(2 * ch + 1, ch), nn.GELU(), nn.Linear(ch, 1))
+        self.drop = nn.Dropout(dropout)
+        nn.init.zeros_(self.out.weight)       # starts as the identity: the base model is recovered exactly,
+        nn.init.zeros_(self.out.bias)         # neighbour information is only added as training finds it useful
+
+    def forward(self, u, src_ok, edge_index, edge_attr):
+        # run in fp32 even under AMP: scatter softmax with -1e4 masking is not fp16-safe
+        with torch.autocast(device_type=u.device.type, enabled=False):
+            return self._forward(u, src_ok, edge_index, edge_attr)
+
+    def _forward(self, u, src_ok, edge_index, edge_attr):
+        B, N, Hn, C = u.shape
+        src, dst = edge_index
+        E = src.numel()
+        uf = u.float()
+        e = self.e(edge_attr.float()).view(1, E, 1, self.h, self.c)
+        q = self.q(uf).view(B, N, Hn, self.h, self.c)[:, dst]                    # [B,E,Hn,h,c]
+        k = self.k(uf).view(B, N, Hn, self.h, self.c)[:, src] + e
+        v = self.v(uf).view(B, N, Hn, self.h, self.c)[:, src] + e
+        score = (q * k).sum(-1) / math.sqrt(self.c)                              # [B,E,Hn,h]
+        ok = src_ok.float()[:, src].view(B, E, 1, 1)
+        score = score.masked_fill(ok == 0, -1e4)
+        idx = dst.view(1, E, 1, 1).expand(B, E, Hn, self.h)
+        smax = torch.full((B, N, Hn, self.h), -1e4, device=u.device).scatter_reduce(
+            1, idx, score.detach(), reduce="amax", include_self=True)
+        ex = torch.exp(score - smax.gather(1, idx)) * ok
+        denom = torch.zeros(B, N, Hn, self.h, device=u.device).index_add_(1, dst, ex)
+        alpha = self.drop(ex / (denom.gather(1, idx) + 1e-6))
+        msg = torch.zeros(B, N, Hn, self.h, self.c, device=u.device).index_add_(
+            1, dst, v * alpha.unsqueeze(-1)).reshape(B, N, Hn, C)
+        m = self.out(msg)
+        own = src_ok.float().view(B, N, 1, 1).expand(B, N, Hn, 1)
+        g = torch.sigmoid(self.gate(torch.cat([uf, m, own], -1)))
+        return (uf + self.drop(g * m)).to(u.dtype)
+
+
 class SagarNet(nn.Module):
     def __init__(self, in_dim: int, fut_dim: int, static_dim: int, edge_index: torch.Tensor,
                  edge_attr: torch.Tensor, horizons=(6, 12, 24, 48, 72), hidden: int = 64, heads: int = 4,
-                 gnn_layers: int = 2, dropout: float = 0.1, dilations=(1, 2, 4, 8, 16), kernel: int = 3):
+                 gnn_layers: int = 2, dropout: float = 0.1, dilations=(1, 2, 4, 8, 16), kernel: int = 3,
+                 transfer: bool = False):
         super().__init__()
         C = hidden
         self.horizons = list(horizons)
@@ -136,8 +198,15 @@ class SagarNet(nn.Module):
         # 5. heads
         self.fut_proj = nn.Sequential(nn.Linear(fut_dim, C), nn.GELU(), nn.Linear(C, C))
         self.h_emb = nn.Embedding(Hn, C // 2)
-        self.head = nn.Sequential(nn.Linear(2 * C + C // 2, 2 * C), nn.GELU(), nn.Dropout(dropout),
-                                  nn.Linear(2 * C, C), nn.GELU(), nn.Linear(C, 3))
+        self.trunk = nn.Sequential(nn.Linear(2 * C + C // 2, 2 * C), nn.GELU(), nn.Dropout(dropout),
+                                   nn.Linear(2 * C, C), nn.GELU())
+        # 6. horizon-wise transfer from observed neighbours (v2.3), real edges only (no self loops)
+        self.transfer = NeighbourTransfer(C, heads, self.edge_attr.size(1), dropout) if transfer else None
+        if transfer:
+            real = self.edge_attr[:, -1] == 0
+            self.register_buffer("tr_edge_index", self.edge_index[:, real].clone())
+            self.register_buffer("tr_edge_attr", self.edge_attr[real].clone())
+        self.out_q = nn.Linear(C, 3)
         init = torch.tensor([math.exp(-h / 24.0) for h in self.horizons]).clamp(1e-3, 1 - 1e-3)
         self.persist_logit = nn.Parameter(torch.log(init / (1 - init)))
 
@@ -158,7 +227,11 @@ class SagarNet(nn.Module):
         Hn = fut.size(2)
         z = torch.cat([h.unsqueeze(2).expand(-1, -1, Hn, -1), self.fut_proj(fut),
                        self.h_emb.weight.view(1, 1, Hn, -1).expand(B, N, -1, -1)], -1)
-        raw = self.head(z)
+        u = self.trunk(z)                                                     # [B,N,Hn,C]
+        if self.transfer is not None:
+            src_ok = (last_mask > 0) if last_mask is not None else torch.ones(B, N, dtype=torch.bool, device=u.device)
+            u = self.transfer(u, src_ok, self.tr_edge_index, self.tr_edge_attr)
+        raw = self.out_q(u)
         q50 = raw[..., 0]
         if last is not None:
             skip = (last * last_mask).unsqueeze(-1) * torch.sigmoid(self.persist_logit)
