@@ -159,6 +159,24 @@ Next experiment, targeting transfer to an unseen coast:
 - `--static-set physical` zeroes the lat/lon static features and keeps bathymetry. With 33 training stations, coordinates act as a station ID: the network can memorise per-station behaviour that does not transfer to an unseen coast. That memorising also makes pseudo-ungauged calibration over-optimistic, which explains coverage of 72% instead of 80%.
 - `--mask-prob 0.5 --masked-weight 2` gives more and heavier hidden-station training, the task that the ungauged evaluation measures.
 
+### 1.1h Seventh round: physical static features, and ensembling
+
+| Penang (ungauged) | v2.3 (transfer) | + `--static-set physical --mask-prob 0.5 --masked-weight 2` |
+|---|---|---|
+| Total MAE | 0.0627 m | 0.0628 m |
+| Surge skill | +18.4% | +17.7% |
+| CQR coverage (width) | 72% (0.125 m) | 89% (0.193 m) |
+| Gauged total MAE | 0.0487 m | 0.0499 m |
+
+Point accuracy did not change, gauged accuracy fell slightly, and the intervals became wider than needed. The defaults stay `--static-set all --mask-prob 0.3`. Across three different model variants (v2.2, v2.3, physical static), Penang ungauged skill sits at **17.7–18.4%**. At this point **the information available at the station limits accuracy more than the network does**:
+
+- About 0.035 m (std) of Penang's target is leftover tide, which neighbours cannot predict.
+- ERA5 is sampled at one point per station.
+
+Remaining low-cost lever: **ensembling**. `evaluate.py --ckpt A B C` now averages the quantiles of several checkpoints with the same holdout, then calibrates and evaluates the ensemble. Members may use different `--static-set` values. Averaging models that make different errors usually lowers MAE, and the variants already trained differ. It needs no training.
+
+The step after that, needing new data: ERA5 wind/pressure **fields** (for example 5×5 cells, about 1.25°) around each station, fed through a small CNN encoder, so the model sees the wind fetch and pressure gradient across the shelf instead of a single point.
+
 ### 1.2 What was kept from v1
 - The five-stage TCN → GRU → static → GATv2 → non-crossing quantile pipeline, hidden size 64, 4 heads, dilations 1–16, kernel 3.
 - The TCN block layout: dilated conv → norm → ReLU → dropout → **1×1 conv** → norm, plus residual.

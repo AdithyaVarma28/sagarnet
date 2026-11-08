@@ -46,9 +46,10 @@ def load_model(ckpt_path: str, device):
 
 
 @torch.no_grad()
-def predict(model, data: SagarData, split: str, stride: int, device, batch_size=64, mask_prob=0.0, seed=0):
+def predict(model, data: SagarData, split: str, stride: int, device, batch_size=64, mask_prob=0.0, seed=0,
+            static_override=None):
     ds = SagarWindows(data, split, stride)
-    static = torch.from_numpy(data.static).to(device)
+    static = torch.from_numpy(data.static if static_override is None else static_override).to(device)
     dl = DataLoader(ds, batch_size, shuffle=False)
     protect = torch.as_tensor(data.holdout, device=device)
     g = torch.Generator().manual_seed(seed)
@@ -66,6 +67,9 @@ def predict(model, data: SagarData, split: str, stride: int, device, batch_size=
         drops.append(drop.cpu().numpy())
         ts.append(b["t"].cpu().numpy())
     return {"q": np.concatenate(qs), "drop": np.concatenate(drops), "t": np.concatenate(ts)}
+
+
+_predict_one = predict
 
 
 def gather_targets(data: SagarData, t: np.ndarray) -> dict:
@@ -216,7 +220,8 @@ def run_evaluation(ckpt: str, dataset: str = C.DEFAULT_DATASET, cache_dir: str =
                    cal_passes: int = 3, test_stride: int = 1, val_stride: int = 3,
                    nbr_level_km: float = 800.0):
     dev = pick_device(device)
-    model, ck = load_model(ckpt, dev)
+    ckpts = [ckpt] if isinstance(ckpt, (str, Path)) else list(ckpt)
+    model, ck = load_model(ckpts[0], dev)
     a = ck["args"]
     cache = build_cache(dataset, cache_dir)
     data = SagarData(cache, ck["holdout"], history=a["history"], stats=ck["stats"],
@@ -231,7 +236,27 @@ def run_evaluation(ckpt: str, dataset: str = C.DEFAULT_DATASET, cache_dir: str =
                 print(f"slow level for ungauged {n}: {src}")
         else:
             print("[warn] graph has no per-edge distance_km; ungauged slow level stays 0")
-    out = Path(out_dir or Path(ckpt).parent)
+    # ---- ensemble members: same holdout/target/data, each with its own static feature set ----
+    members = [(model, None)]
+    for c in ckpts[1:]:
+        m2, ck2 = load_model(c, dev)
+        a2 = ck2["args"]
+        if sorted(ck2["holdout"]) != sorted(ck["holdout"]) or a2.get("target", "full") != a.get("target", "full")                 or a2["history"] != a["history"] or a2["no_future_forcing"] != a["no_future_forcing"]:
+            raise ValueError(f"{c}: ensemble members must share holdout, target, history and forcing mode")
+        st = None
+        if a2.get("static_set", "all") != a.get("static_set", "all"):
+            st = SagarData.static_for(cache, ck2["stats"], a2.get("static_set", "all"))
+        members.append((m2, st))
+    if len(members) > 1:
+        print(f"Ensemble of {len(members)} checkpoints: " + ", ".join(str(c) for c in ckpts))
+
+    def predict(_model, d, split, stride, device, mask_prob=0.0, seed=0):   # noqa: shadows module-level predict
+        outs = [_predict_one(m, d, split, stride, device, mask_prob=mask_prob, seed=seed, static_override=st)
+                for m, st in members]
+        q = np.mean([o["q"] for o in outs], 0)          # mean of sorted quantile vectors stays non-crossing
+        return {"q": q, "drop": outs[0]["drop"], "t": outs[0]["t"]}
+
+    out = Path(out_dir or Path(ckpts[0]).parent)
     hz = list(C.HORIZONS)
     gauged_nodes = ~data.holdout
     has_tide = np.isfinite(data.tide).any(0)
@@ -253,7 +278,7 @@ def run_evaluation(ckpt: str, dataset: str = C.DEFAULT_DATASET, cache_dir: str =
     # ---- test ----
     pt = predict(model, data, "test", test_stride, dev)
     tt = gather_targets(data, pt["t"])
-    results = {"checkpoint": ckpt, "holdout": ck["holdout"], "alpha": alpha, "cqr_mode": cqr_mode,
+    results = {"checkpoint": [str(c) for c in ckpts], "holdout": ck["holdout"], "alpha": alpha, "cqr_mode": cqr_mode,
                "mondrian": mondrian, "q_hat_gauged": cal_g.global_qhat(), "q_hat_ungauged": cal_u.global_qhat()}
 
     rep_g = horizon_report(flatten(pt, tt, gauged_nodes & has_tide), cal_g, hz, gauged=True)
@@ -286,10 +311,11 @@ def run_evaluation(ckpt: str, dataset: str = C.DEFAULT_DATASET, cache_dir: str =
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--ckpt", required=True)
+    ap.add_argument("--ckpt", required=True, nargs="+",
+                    help="one checkpoint, or several (same holdout) to evaluate their averaged ensemble")
     ap.add_argument("--dataset", default=C.DEFAULT_DATASET)
     ap.add_argument("--cache-dir", default=C.DEFAULT_CACHE_DIR)
-    ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--out-dir", default=None, help="default: folder of the first checkpoint (use a new one for ensembles)")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--alpha", type=float, default=0.2)
     ap.add_argument("--cqr-mode", choices=["additive", "scaled"], default="additive")
@@ -301,7 +327,7 @@ def main():
     ap.add_argument("--nbr-level-km", type=float, default=800.0,
                     help="ungauged slow level from gauged neighbours within this sea-route distance; 0 = off")
     a = ap.parse_args()
-    run_evaluation(a.ckpt, a.dataset, a.cache_dir, a.out_dir, a.device, a.alpha, a.cqr_mode,
+    run_evaluation(a.ckpt if len(a.ckpt) > 1 else a.ckpt[0], a.dataset, a.cache_dir, a.out_dir, a.device, a.alpha, a.cqr_mode,
                    not a.no_mondrian, a.cal_mask_prob, a.cal_passes, a.test_stride, a.val_stride,
                    a.nbr_level_km)
 

@@ -333,15 +333,7 @@ class SagarData:
         self.resid_full_n = (self.resid_full / self.scale).astype(np.float32)
         self.off_n = (self.off / self.scale).astype(np.float32)
         self.ib_n = (self.ib_t / self.scale).astype(np.float32)
-        self.static = ((cache["static"] - stats["static_mean"]) / stats["static_std"]).astype(np.float32)
-        if static_set == "physical":
-            # drop station-identifying coordinates, keep bathymetry. With 33 training stations, lat/lon
-            # let the network memorise per-station behaviour that cannot transfer to an unseen coast.
-            names = [str(n) for n in cache["static_names"]]
-            geo = [i for i, n in enumerate(names) if n in ("lat", "lon", "sin_lon", "cos_lon")]
-            self.static[:, geo] = 0.0
-        elif static_set != "all":
-            raise ValueError(static_set)
+        self.static = self.static_for(cache, stats, static_set)
 
         self.F = self.dyn.shape[-1]
         self.in_dim = self.F + 2
@@ -362,6 +354,19 @@ class SagarData:
         if hi < lo:
             raise ValueError(f"Split '{split}' is empty with history={L}, max horizon={H}")
         return np.arange(lo, hi + 1, stride)
+
+    @staticmethod
+    def static_for(cache: dict, stats: dict, static_set: str = "all") -> np.ndarray:
+        """Normalised static features. "physical" drops station-identifying coordinates, keeps bathymetry:
+        with 33 training stations, lat/lon let the network memorise per-station behaviour that cannot
+        transfer to an unseen coast."""
+        st = ((cache["static"] - stats["static_mean"]) / stats["static_std"]).astype(np.float32)
+        if static_set == "physical":
+            names = [str(n) for n in cache["static_names"]]
+            st[:, [i for i, n in enumerate(names) if n in ("lat", "lon", "sin_lon", "cos_lon")]] = 0.0
+        elif static_set != "all":
+            raise ValueError(static_set)
+        return st
 
     def set_neighbour_level(self, edge_index, distance_km, max_km: float = 800.0) -> dict:
         """Slow level at ungauged stations from gauged graph neighbours (causal).
