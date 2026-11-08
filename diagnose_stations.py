@@ -20,7 +20,11 @@ lag_*                     time shift (hours) of the tide that best matches the
                           observations in that split; train should be 0. A
                           non-zero test lag (e.g. +5 or +6) means the timestamps
                           changed (e.g. local time vs UTC)
-flags                     DATUM_SHIFT, TIME_SHIFT, NOISY, SPARSE_TRAIN, NO_FIT
+leak_std_*                std [m] of the surge target inside the tidal bands (1, 2, 3, 4, 6, 8
+                          cycles/day). Real weather surge has little energy there, so a large
+                          value means tide is leaking into the target (missing constituents,
+                          nodal modulation, shallow-water distortion)
+flags                     DATUM_SHIFT, TIME_SHIFT, NOISY, TIDE_LEAK, SPARSE_TRAIN, NO_FIT
 """
 from __future__ import annotations
 
@@ -48,6 +52,21 @@ def best_lag(obs, tide, valid, max_lag=12):
         if e < best[1]:
             best = (L, e)
     return best
+
+
+def tidal_band_std(x, half_width_cpd=0.15, bands=(1, 2, 3, 4, 6, 8)):
+    """Std of the part of an hourly series (NaN = gap) that lies in the tidal bands."""
+    v = np.isfinite(x)
+    if v.sum() < 24 * 30:
+        return np.nan
+    z = np.where(v, x - np.nanmean(x), 0.0)
+    F = np.fft.rfft(z)
+    f = np.fft.rfftfreq(len(z), d=1 / 24.0)          # cycles per day
+    keep = np.zeros_like(f, dtype=bool)
+    for b in bands:
+        keep |= np.abs(f - b) <= half_width_cpd
+    band = np.fft.irfft(np.where(keep, F, 0), n=len(z))
+    return float(np.std(band[v]) / np.sqrt(v.mean()))   # undo the zero-fill dilution
 
 
 def main():
@@ -87,6 +106,7 @@ def main():
         for k, s in splits.items():
             v = np.isfinite(surge[s])
             r[f"surge_std_{k}"] = float(np.std(surge[s][v])) if v.sum() > 100 else np.nan
+            r[f"leak_std_{k}"] = tidal_band_std(surge[s])
         rows.append(r)
 
     df = pd.DataFrame(rows)
@@ -113,11 +133,13 @@ def main():
                 flags.append(f"TIME_SHIFT_{k}({int(r[f'lag_{k}']):+d}h)")
             if r[f"surge_std_{k}"] > 1.5 * max(r["surge_std_train"], 1e-3):
                 flags.append(f"NOISY_{k}")
+        if np.isfinite(r["leak_std_train"]) and r["leak_std_train"] > 0.03:
+            flags.append(f"TIDE_LEAK({r['leak_std_train']:.2f}m)")
         flags_col.append(" ".join(flags))
     df["flags"] = flags_col
     df.to_csv(a.out, index=False)
     cols = ["station", "n_train", "n_test", "mean_test", "rel_mean_test", "surge_std_train",
-            "surge_std_test", "lag_test", "flags"]
+            "surge_std_test", "leak_std_train", "leak_std_test", "lag_test", "flags"]
     with pd.option_context("display.width", 250, "display.max_rows", 100, "display.max_colwidth", 80):
         print(df[cols].round(3).to_string(index=False))
     bad = df[df["flags"] != ""]

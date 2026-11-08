@@ -32,7 +32,7 @@ from torch.utils.data import Dataset
 import config as C
 from tides import fit_tide, hours_since_epoch, predict_tide, tidal_phase_features
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 # Columns that should not be z-scored (binary / already bounded).
 _NO_NORM_PREFIX = ("tide_", "doy_")
@@ -198,17 +198,17 @@ def build_cache(csv_path: str, cache_dir: str = C.DEFAULT_CACHE_DIR, force: bool
     t0 = float(t_hours[0])
     for j in range(N):
         coef = fit_tide(t_hours[:train_end], sea[:train_end, j], valid[:train_end, j],
-                        C.HARMONIC_PERIODS_H, t0)
+                        C.HARMONIC_CONSTITUENTS, t0, nodal=C.TIDE_NODAL)
         src = 1
         if coef is None:   # station starts late: fall back to pre-test data, never test data
             coef = fit_tide(t_hours[:val_end], sea[:val_end, j], valid[:val_end, j],
-                            C.HARMONIC_PERIODS_H, t0)
+                            C.HARMONIC_CONSTITUENTS, t0, nodal=C.TIDE_NODAL)
             src = 2
         if coef is None:
             print(f"  [warn] {names[j]}: too little data for harmonic analysis -> no targets")
             valid[:, j] = False
             continue
-        tide[:, j] = predict_tide(t_hours, coef, C.HARMONIC_PERIODS_H, t0)
+        tide[:, j] = predict_tide(t_hours, coef, C.HARMONIC_CONSTITUENTS, t0)
         tide_src[j] = src
 
     # ---------------- despike residual (label QC only) ----------------

@@ -54,14 +54,40 @@ TIDE_FEATURE_PERIODS_H = {
 
 # Constituents for the per-station least-squares harmonic analysis used to
 # split total water level into astronomical tide + non-tidal residual (surge).
-# All are resolvable (Rayleigh criterion) with >= 1 year of hourly data.
-HARMONIC_PERIODS_H = {
-    "M2": 12.4206012, "S2": 12.0, "N2": 12.65834751, "K2": 11.96723606,
-    "K1": 23.93447213, "O1": 25.81933871, "P1": 24.06589016, "Q1": 26.86835667,
-    "S1": 24.0,
-    "M4": 6.210300601, "MS4": 6.103339275, "MN4": 6.269173724, "M6": 4.140200401,
-    "Mf": 327.8599387, "Mm": 661.3111655, "Ssa": 4382.905209, "Sa": 8766.15265,
+# name -> (period [h], nodal recipe). The nodal recipe says how the 18.61-year
+# lunar-node modulation (amplitude factor f, phase shift u) is built from the
+# base constituents in tides.py: {base: k} gives f = prod f_base^|k| and
+# u = sum k*u_base; {} = no nodal modulation (solar constituents).
+# Order = priority: when a station's record is too short to separate two
+# constituents (Rayleigh criterion), the later one is dropped.
+# v2.1 adds nodal corrections and the shallow-water / minor constituents that
+# matter at large-tide shallow stations (e.g. Kelang, residual std 0.19 m with
+# the 17-constituent fit: mostly tide leaking into the "surge").
+HARMONIC_CONSTITUENTS = {
+    # major
+    "M2": (12.4206012, {"M2": 1}), "S2": (12.0, {}), "K1": (23.93447213, {"K1": 1}),
+    "O1": (25.81933871, {"O1": 1}), "N2": (12.65834751, {"M2": 1}), "K2": (11.96723606, {"K2": 1}),
+    "P1": (24.06589016, {}), "Q1": (26.86835667, {"O1": 1}),
+    # long period
+    "Sa": (8766.15265, {}), "Ssa": (4382.905209, {}), "Mm": (661.3111655, {"Mm": 1}),
+    "Mf": (327.8599387, {"Mf": 1}), "MSf": (354.3670666, {"M2": -1}),
+    # minor diurnal / semidiurnal
+    "S1": (24.0, {}), "J1": (23.09848146, {"J1": 1}), "OO1": (22.30608083, {"OO1": 1}),
+    "2Q1": (28.00621204, {"O1": 1}), "2N2": (12.90537297, {"M2": 1}), "MU2": (12.87175763, {"M2": 1}),
+    "NU2": (12.62600205, {"M2": 1}), "L2": (12.19162085, {"M2": 1}), "T2": (12.01644934, {}),
+    "2SM2": (11.60695156, {"M2": -1}),
+    # shallow water / overtides
+    "M3": (8.280400802, {"M2": 1.5}), "MO3": (8.38630265, {"M2": 1, "O1": 1}),
+    "MK3": (8.177140247, {"M2": 1, "K1": 1}), "SK3": (7.992705055, {"K1": 1}),
+    "M4": (6.210300601, {"M2": 2}), "MS4": (6.103339275, {"M2": 1}), "MN4": (6.269173724, {"M2": 2}),
+    "MK4": (6.094852323, {"M2": 1, "K2": 1}), "S4": (6.0, {}),
+    "M6": (4.140200401, {"M2": 3}), "2MS6": (4.092383475, {"M2": 2}), "2MN6": (4.166283604, {"M2": 3}),
+    "M8": (3.105150301, {"M2": 4}),
 }
+TIDE_NODAL = True
+# Kept for reference / old code paths: the v2.0 17-constituent set.
+HARMONIC_PERIODS_H = {k: HARMONIC_CONSTITUENTS[k][0] for k in (
+    "M2", "S2", "N2", "K2", "K1", "O1", "P1", "Q1", "S1", "M4", "MS4", "MN4", "M6", "Mf", "Mm", "Ssa", "Sa")}
 
 # --------------------------------------------------------------------------- #
 # Schema

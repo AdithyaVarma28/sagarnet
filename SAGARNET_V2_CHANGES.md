@@ -77,6 +77,31 @@ On synthetic data built to reproduce this pattern, the ungauged surge skill went
 
 `diagnose_stations.py` now flags offsets **relative to the regional median**, plus `NO_DATA`, `TIME_SHIFT` and `NOISY` (using surge variance).
 
+### 1.1d Third round: surge-target LOSO on three stations, and tidal leakage
+
+| Station (ungauged) | Nearest gauge by sea | Surge MAE | Zero-surge MAE | Surge skill | Total MAE (tide-only) |
+|---|---|---|---|---|---|
+| Penang | ~100–200 km (Malacca Strait) | 0.067 m | 0.079 m | **+15.0%** | 0.106 m (0.112) |
+| Kelang | ~100–200 km (Malacca Strait) | 0.140 m | 0.141 m | +0.2% | 0.182 m (0.182) |
+| Cochin | 2,112 km | 0.078 m | 0.076 m | −2.4% | 0.223 m (0.223) |
+
+Gauged stations: total MAE 0.055 m against 0.10 m for tide + 30-day level, with surge skill of +46% in all three runs.
+
+- **Penang** shows that transfer to an ungauged station works when it has nearby neighbours.
+- **Cochin** has no neighbour within 2,000 km by sea, and Arabian Sea surge is unrelated to the Bay of Bengal and SE Asian stations. Treat it as an extrapolation limit, not the headline LOSO case.
+- **Kelang** has a zero-surge MAE of 0.14 m, nearly twice the network average, and its residual std is 0.19 m **in the training years too** (Penang 0.10 m). Kelang has a ~5 m tidal range in a shallow strait. That much "surge" is **tide leaking into the target**:
+  - The 17-constituent fit misses the shallow-water and minor constituents (MK3, MO3, 2MS6, MU2, 2N2, L2, …).
+  - It ignores the 18.6-year nodal modulation. M2 amplitude changes ±3.7% and K1/O1 change 11–19%, so a fit averaged over 2011–19 is wrong in 2022 by several cm at a large-tide station.
+  - A station's tidal leakage is specific to that station. Neighbours cannot predict it, so ungauged skill is near zero and the CQR intervals (calibrated on the other stations) only covered 30%.
+
+**Fix (v2.1, `tides.py`, `config.HARMONIC_CONSTITUENTS`):**
+
+- 36 constituents, including the shallow-water and minor ones.
+- Nodal amplitude/phase corrections f(t), u(t) from the Moon's node longitude (Schureman formulas; compound tides combine their parents).
+- A Rayleigh check per station that drops constituents its record is too short to separate.
+
+On a synthetic Kelang-like tide (1.6 m M2, overtides, nodal modulation), the leakage std fell from 0.10–0.13 m with the old fit to 0.001 m. The cache version is bumped to 4, so the first run rebuilds the cache automatically. `diagnose_stations.py` gained `leak_std_train/test`, the std of the surge target inside the tidal bands (1–8 cycles/day), and a `TIDE_LEAK` flag (> 0.03 m).
+
 ### 1.2 What was kept from v1
 - The five-stage TCN → GRU → static → GATv2 → non-crossing quantile pipeline, hidden size 64, 4 heads, dilations 1–16, kernel 3.
 - The TCN block layout: dilated conv → norm → ReLU → dropout → **1×1 conv** → norm, plus residual.
@@ -95,7 +120,7 @@ On synthetic data built to reproduce this pattern, the ungauged surge skill went
 | File | Status | What it does / what changed |
 |---|---|---|
 | `config.py` | **new** | One place for constants: paths, SI physics constants (ρw = 1025, g = 9.80665, ρw·g ≈ 10051.8 Pa/m), horizons, quantiles, temporal splits, tide constituents, column aliases, cyclone defaults. |
-| `tides.py` | **new** | (a) Cyclical tidal phase features from spec 3.1 with τ = t + lon/15 (S1, M2, S2, plus K1 and O1). (b) Robust least-squares **harmonic analysis** with 17 constituents (M2, S2, N2, K2, K1, O1, P1, Q1, S1, M4, MS4, MN4, M6, Mf, Mm, Ssa, Sa) plus mean and linear trend. |
+| `tides.py` | **new** | (a) Cyclical tidal phase features from spec 3.1 with τ = t + lon/15 (S1, M2, S2, plus K1 and O1). (b) Robust least-squares **harmonic analysis** with 36 constituents (major, long-period, minor and shallow-water; see `config.HARMONIC_CONSTITUENTS`), 18.6-year nodal corrections, a per-station Rayleigh check, plus mean and linear trend. (v2.0 used 17 constituents without nodal corrections.) |
 | `construct_graph.py` | **rewritten** | Elevation column fallback chain `gebco_mean_5km_m → gebco_nearest_m → gebco_min_5km_m → elevation_m`. Reads the CSV in chunks. **Sea-route connectivity:** builds a 0.1° ocean grid, snaps each station to open sea, and uses Dijkstra to get water-only path lengths. An edge is allowed if the sea route is ≤ 2200 km and ≤ 2.5× the straight-line distance. Every node gets at least 2 marine neighbours, and disconnected parts are bridged. `sim_geo` uses the sea-route distance. Edge attributes are `[sim_geo, sim_bath, sin(bearing), cos(bearing)]`. Prints every node's neighbours and writes `static_graph_edges.csv`. |
 | `diagnose_stations.py` | **new** | Per-station data-quality check: residual mean/std per split, tide-only MAE, best timestamp lag per split. Flags `DATUM_SHIFT`, `TIME_SHIFT`, `NOISY`, `SPARSE_TRAIN`. `--station X` also saves a plot. |
 | `sagar_dataset.py` | **rewritten** | `cyclone_*` schema with legacy `storm_*` aliases. Cleans the GESLA missing-value sentinel (−99.9999). Gap-fills forcing. Computes physics-derived features. Runs a train-period tide fit per station and builds the surge residual target. Despikes labels. Caches everything to `cache/*.npz`. Window dataset with history and mask channels. |
@@ -411,7 +436,8 @@ A v1 `static_graph.pt` is rejected with a clear message: rebuild it, because v2 
 
 ## 11. Known limitations and next steps
 
-- **Nodal corrections:** the harmonic fit ignores the 18.6-year nodal modulation, which leaves a few cm of slow drift. Swap in `utide` inside `tides.py` for a full analysis.
+- **Tide analysis:** v2.1 adds nodal corrections and 36 constituents, but L2 uses M2's nodal factor and there are no astronomical V0 arguments (phases are absorbed by the fit). For a reference-grade analysis, swap in `utide` inside `tides.py`.
+- **Cochin:** no gauge within 2,000 km by sea, so graph transfer cannot help. Report it as an extrapolation case and use stations inside the network (Penang, Kelang, Lumut, …) as the main LOSO results.
 - **Ungauged tide:** total water level at a truly ungauged site needs a global tide model (FES2014/TPXO). Ungauged surge MAE is the clean metric.
 - **Oracle forcing:** the default feeds reanalysis (ERA5/IBTrACS) at future times, which is a hindcast setting. Report `--no-future-forcing` results too for an operational comparison.
 - **GESLA datum jumps:** sudden instrument datum shifts are not detected automatically. Check the per-station residual std printed at cache build.
