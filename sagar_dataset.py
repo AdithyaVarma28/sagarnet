@@ -32,7 +32,7 @@ from torch.utils.data import Dataset
 import config as C
 from tides import fit_tide, hours_since_epoch, predict_tide, tidal_phase_features
 
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 
 # Columns that should not be z-scored (binary / already bounded).
 _NO_NORM_PREFIX = ("tide_", "doy_")
@@ -303,6 +303,7 @@ class SagarData:
         self.ib_t = ib_t.astype(np.float32)
         # slow level usable for total-water-level reconstruction: unknown (0) at ungauged stations
         self.lf_known = np.where(self.holdout[None, :], 0.0, self.off).astype(np.float32)
+        self.lf_source = {}
         self.cyc_active = cache["cyc_active"]
         self.dyn_names = [str(s) for s in cache["dyn_names"]]
 
@@ -352,6 +353,35 @@ class SagarData:
         if hi < lo:
             raise ValueError(f"Split '{split}' is empty with history={L}, max horizon={H}")
         return np.arange(lo, hi + 1, stride)
+
+    def set_neighbour_level(self, edge_index, distance_km, max_km: float = 800.0) -> dict:
+        """Slow level at ungauged stations from gauged graph neighbours (causal).
+
+        The 30-day sea-level anomaly is mostly regional, so at a held-out station
+        it is estimated as the inverse-distance mean of the trailing 30-day level of
+        gauged neighbours within ``max_km`` (sea route). Uses only their past data,
+        so it is available at forecast time. No neighbour in range -> stays 0.
+        """
+        if self.target_mode != "surge":
+            return {}
+        ei = np.asarray(edge_index)
+        dk = np.asarray(distance_km, dtype=np.float64).reshape(-1)
+        for j in np.flatnonzero(self.holdout):
+            nb = {}
+            for (a, b), d in zip(ei.T, dk):
+                k = a if b == j else b if a == j else -1
+                if k >= 0 and k != j and not self.holdout[k] and d <= max_km:
+                    nb[int(k)] = min(d, nb.get(int(k), np.inf))
+            if not nb:
+                self.lf_source[self.names[j]] = "none in range -> 0"
+                continue
+            ks = np.array(list(nb)); w = 1.0 / np.maximum(np.array([nb[k] for k in ks]), 50.0)
+            ok = self.off_ok[:, ks].astype(np.float64) * w[None, :]
+            num = (self.off[:, ks] * ok).sum(1)
+            den = ok.sum(1)
+            self.lf_known[:, j] = np.where(den > 0, num / np.maximum(den, 1e-12), 0.0).astype(np.float32)
+            self.lf_source[self.names[j]] = ", ".join(f"{self.names[k]}({nb[k]:.0f} km)" for k in ks)
+        return self.lf_source
 
 
 class SagarWindows(Dataset):

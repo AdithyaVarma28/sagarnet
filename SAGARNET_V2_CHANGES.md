@@ -102,6 +102,26 @@ Gauged stations: total MAE 0.055 m against 0.10 m for tide + 30-day level, with 
 
 On a synthetic Kelang-like tide (1.6 m M2, overtides, nodal modulation), the leakage std fell from 0.10–0.13 m with the old fit to 0.001 m. The cache version is bumped to 4, so the first run rebuilds the cache automatically. `diagnose_stations.py` gained `leak_std_train/test`, the std of the surge target inside the tidal bands (1–8 cycles/day), and a `TIDE_LEAK` flag (> 0.03 m).
 
+### 1.1e Fourth round: Kelang after the tide fix, and neighbour slow level
+
+With the 36-constituent nodal fit (Kelang held out, 15 epochs):
+
+| | Before | After |
+|---|---|---|
+| Gauged total MAE | 0.0551 m | **0.0483 m** |
+| Gauged tide + 30-day-level baseline | 0.0999 m | 0.0749 m (cleaner tide) |
+| Kelang zero-surge MAE (size of its target) | 0.1405 m | 0.0899 m |
+| Kelang surge skill | +0.2% | **+8.0%** |
+| Kelang total MAE | 0.182 m | 0.144 m |
+| Kelang CQR coverage | 30% | 51% |
+
+Kelang's total error is now mostly **bias (−0.129 m)**: the 2022 slow sea-level anomaly (+0.13 m) that an ungauged station was assumed not to know. That anomaly is regional (median +0.10 m over all stations in 2022), so v2.2 estimates it from gauged neighbours:
+
+- **Neighbour slow level** (`SagarData.set_neighbour_level`, used in `evaluate.py`): at a held-out station, the slow level is the inverse-distance mean of the **trailing** 30-day level of gauged graph neighbours within 800 km by sea. It uses only past data, so it is available at forecast time. Cochin has no neighbour in range, so it stays at 0. Turn it off with `evaluate.py --nbr-level-km 0`. The ungauged baseline is now labelled `tide+nbr-level`.
+- **Seasonal tide sidebands:** MA2 and MB2 (M2 ± annual) and R2 (S2 + annual) model the monsoon modulation of the tide in shallow seas. The leakage diagnostic still showed 0.12–0.15 m in-band at Kelang, Tawau and Moulmein in the training years. In-sample, that can only come from tide that varies over time. 39 constituents; cache version 5.
+
+`TIDE_LEAK` (> 0.03 m) now flags most stations at the 0.03–0.04 m level. That is normal for a tidal fit. Only stations above ~0.06 m (Kelang, Tawau, Moulmein, Ambon, Cochin, Cendering, Kukup, Vung_Tau) carry meaningful leakage.
+
 ### 1.2 What was kept from v1
 - The five-stage TCN → GRU → static → GATv2 → non-crossing quantile pipeline, hidden size 64, 4 heads, dilations 1–16, kernel 3.
 - The TCN block layout: dilated conv → norm → ReLU → dropout → **1×1 conv** → norm, plus residual.

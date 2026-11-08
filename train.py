@@ -200,7 +200,8 @@ def main(argv=None):
             torch.save({"model_state": ema.module.state_dict(), "model_kwargs": model_kwargs,
                         "stats": data.stats, "args": vars(args), "station_names": data.names,
                         "dyn_names": data.dyn_names, "holdout": args.holdout,
-                        "graph": {"edge_index": graph["edge_index"], "edge_attr": graph["edge_attr"]},
+                        "graph": {"edge_index": graph["edge_index"], "edge_attr": graph["edge_attr"],
+                                  "distance_km": graph.get("distance_km")},
                         "epoch": epoch, "val_score": score}, ckpt_path)
         else:
             bad += 1

@@ -31,7 +31,7 @@ import config as C
 from calibration import CQR
 from model import SagarNet
 from sagar_dataset import SagarData, SagarWindows, build_cache
-from utils import mask_history, pick_device, random_node_mask, to_device
+from utils import load_graph, mask_history, pick_device, random_node_mask, to_device
 
 
 def load_model(ckpt_path: str, device):
@@ -148,7 +148,7 @@ def print_report(title: str, rep: dict, gauged: bool):
         return
     a = rep["average"]
     print(f"\n=== {title} ===")
-    base_lbl = "tide+30d-level" if gauged else "tide-only"
+    base_lbl = "tide+30d-level" if gauged else "tide+nbr-level"
     print(f"Average MAE total {a['mae_total']:.4f} m (persistence {a['mae_persistence']:.4f}, "
           f"{base_lbl} {a['mae_tide_only']:.4f}, +IB {a['mae_tide_ib']:.4f}"
           + (f", tide+persist {a['mae_tide_persist']:.4f}" if gauged else "") + ")")
@@ -209,13 +209,23 @@ def save_prediction_plot(e: dict, cal: CQR, horizons, station: str, path: Path, 
 def run_evaluation(ckpt: str, dataset: str = C.DEFAULT_DATASET, cache_dir: str = C.DEFAULT_CACHE_DIR,
                    out_dir: str | None = None, device: str = "auto", alpha: float = 0.2,
                    cqr_mode: str = "additive", mondrian: bool = True, cal_mask_prob: float = 0.3,
-                   cal_passes: int = 3, test_stride: int = 1, val_stride: int = 3):
+                   cal_passes: int = 3, test_stride: int = 1, val_stride: int = 3,
+                   nbr_level_km: float = 800.0):
     dev = pick_device(device)
     model, ck = load_model(ckpt, dev)
     a = ck["args"]
     cache = build_cache(dataset, cache_dir)
     data = SagarData(cache, ck["holdout"], history=a["history"], stats=ck["stats"],
                      use_future_forcing=not a["no_future_forcing"], target=a.get("target", "full"))
+    if nbr_level_km > 0 and data.holdout.any():
+        g = ck.get("graph", {})
+        if g.get("distance_km") is None and Path(a.get("graph", C.DEFAULT_GRAPH)).exists():
+            g = load_graph(a.get("graph", C.DEFAULT_GRAPH), data.names)
+        if g.get("distance_km") is not None and len(np.asarray(g["distance_km"]).reshape(-1)) == np.asarray(g["edge_index"]).shape[1]:
+            for n, src in data.set_neighbour_level(g["edge_index"], g["distance_km"], nbr_level_km).items():
+                print(f"slow level for ungauged {n}: {src}")
+        else:
+            print("[warn] graph has no per-edge distance_km; ungauged slow level stays 0")
     out = Path(out_dir or Path(ckpt).parent)
     hz = list(C.HORIZONS)
     gauged_nodes = ~data.holdout
@@ -283,9 +293,12 @@ def main():
     ap.add_argument("--cal-passes", type=int, default=3)
     ap.add_argument("--test-stride", type=int, default=1)
     ap.add_argument("--val-stride", type=int, default=3)
+    ap.add_argument("--nbr-level-km", type=float, default=800.0,
+                    help="ungauged slow level from gauged neighbours within this sea-route distance; 0 = off")
     a = ap.parse_args()
     run_evaluation(a.ckpt, a.dataset, a.cache_dir, a.out_dir, a.device, a.alpha, a.cqr_mode,
-                   not a.no_mondrian, a.cal_mask_prob, a.cal_passes, a.test_stride, a.val_stride)
+                   not a.no_mondrian, a.cal_mask_prob, a.cal_passes, a.test_stride, a.val_stride,
+                   a.nbr_level_km)
 
 
 if __name__ == "__main__":
