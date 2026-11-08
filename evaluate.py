@@ -220,7 +220,8 @@ def run_evaluation(ckpt: str, dataset: str = C.DEFAULT_DATASET, cache_dir: str =
     a = ck["args"]
     cache = build_cache(dataset, cache_dir)
     data = SagarData(cache, ck["holdout"], history=a["history"], stats=ck["stats"],
-                     use_future_forcing=not a["no_future_forcing"], target=a.get("target", "full"))
+                     use_future_forcing=not a["no_future_forcing"], target=a.get("target", "full"),
+                     static_set=a.get("static_set", "all"))
     if nbr_level_km > 0 and data.holdout.any():
         g = ck.get("graph", {})
         if g.get("distance_km") is None and Path(a.get("graph", C.DEFAULT_GRAPH)).exists():

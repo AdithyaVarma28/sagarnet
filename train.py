@@ -50,6 +50,8 @@ def get_args(argv=None):
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--gnn-layers", type=int, default=2, help="0 = no graph (v1 --no_gat GRU baseline)")
     ap.add_argument("--no_gat", "--no-gat", action="store_true", help="alias for --gnn-layers 0")
+    ap.add_argument("--static-set", choices=["all", "physical"], default="all",
+                    help="physical: zero lat/lon static features (keep bathymetry) to stop per-station memorising")
     ap.add_argument("--no-transfer", action="store_true",
                     help="disable the v2.3 horizon-wise neighbour transfer (ablation / v2.2 model)")
     ap.add_argument("--dropout", type=float, default=0.1)
@@ -133,7 +135,7 @@ def main(argv=None):
 
     cache = build_cache(args.dataset, args.cache_dir, force=args.rebuild_cache)
     data = SagarData(cache, args.holdout, history=args.history, use_future_forcing=not args.no_future_forcing,
-                     target=args.target)
+                     target=args.target, static_set=args.static_set)
     graph = load_graph(args.graph, data.names)
     print(f"Device {device} | stations {data.N} | holdout {args.holdout} | residual scale {data.scale:.4f} m")
     print(f"Input dim {data.in_dim} | future dim {data.fut_dim} | static dim {data.static_dim}")

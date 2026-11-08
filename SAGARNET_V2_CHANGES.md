@@ -143,6 +143,22 @@ Architecture change, v2.3 **NeighbourTransfer** (`model.py`): in v2.2 an ungauge
 - Cost: +25k parameters (224k → 250k) and about 5% more time per step. On synthetic data, where surge is local, it ties the v2.2 model (+21.3% against +21.2% ungauged skill). Real gains have to be measured on Penang and Kelang.
 - Old checkpoints still load (`head.*` keys are remapped). Train with `--no-transfer` for the v2.2 ablation.
 
+### 1.1g Sixth round: results of the neighbour slow level and NeighbourTransfer
+
+| Ungauged | v2.1 | v2.2 (+ neighbour slow level) | v2.3 (+ NeighbourTransfer) |
+|---|---|---|---|
+| Kelang total MAE / bias | 0.144 m / −0.129 m | **0.092 m / −0.023 m** | n/a |
+| Penang total MAE | 0.106 m | 0.063 m | **0.063 m** |
+| Penang surge skill | +15.0% | +17.7% | +18.4% |
+| Penang CQR coverage | 58% | 69% | 72% |
+
+The neighbour slow level is the large gain: total error is down 36% at Kelang and 40% at Penang. NeighbourTransfer adds +0.7 pp of skill and +3 pp of coverage at the same cost, which is within single-seed noise. It is kept because it is cheap and does no harm.
+
+Next experiment, targeting transfer to an unseen coast:
+
+- `--static-set physical` zeroes the lat/lon static features and keeps bathymetry. With 33 training stations, coordinates act as a station ID: the network can memorise per-station behaviour that does not transfer to an unseen coast. That memorising also makes pseudo-ungauged calibration over-optimistic, which explains coverage of 72% instead of 80%.
+- `--mask-prob 0.5 --masked-weight 2` gives more and heavier hidden-station training, the task that the ungauged evaluation measures.
+
 ### 1.2 What was kept from v1
 - The five-stage TCN → GRU → static → GATv2 → non-crossing quantile pipeline, hidden size 64, 4 heads, dilations 1–16, kernel 3.
 - The TCN block layout: dilated conv → norm → ReLU → dropout → **1×1 conv** → norm, plus residual.

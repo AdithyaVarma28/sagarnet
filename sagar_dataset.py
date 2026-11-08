@@ -252,7 +252,8 @@ def build_cache(csv_path: str, cache_dir: str = C.DEFAULT_CACHE_DIR, force: bool
 class SagarData:
     def __init__(self, cache: dict, holdout: list[str] | None = None, history: int = C.HISTORY_HOURS,
                  horizons=C.HORIZONS, future_lags=C.FUTURE_LAGS, use_future_forcing: bool = True,
-                 stats: dict | None = None, target: str = "surge", lf_window: int = C.LF_WINDOW_HOURS):
+                 stats: dict | None = None, target: str = "surge", lf_window: int = C.LF_WINDOW_HOURS,
+                 static_set: str = "all"):
         """
         target="surge" (default): residual = slow mean-sea-level anomaly + fast surge.
             label  = residual(t+h) - centred 30-day mean     (fast surge; robust to datum jumps)
@@ -333,6 +334,14 @@ class SagarData:
         self.off_n = (self.off / self.scale).astype(np.float32)
         self.ib_n = (self.ib_t / self.scale).astype(np.float32)
         self.static = ((cache["static"] - stats["static_mean"]) / stats["static_std"]).astype(np.float32)
+        if static_set == "physical":
+            # drop station-identifying coordinates, keep bathymetry. With 33 training stations, lat/lon
+            # let the network memorise per-station behaviour that cannot transfer to an unseen coast.
+            names = [str(n) for n in cache["static_names"]]
+            geo = [i for i, n in enumerate(names) if n in ("lat", "lon", "sin_lon", "cos_lon")]
+            self.static[:, geo] = 0.0
+        elif static_set != "all":
+            raise ValueError(static_set)
 
         self.F = self.dyn.shape[-1]
         self.in_dim = self.F + 2
